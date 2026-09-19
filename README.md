@@ -1,3 +1,5 @@
+<img src="app/app-icon.png" width="128" height="128" alt="Deslop app icon" />
+
 # Deslop
 
 Deslop is a macOS desktop utility for reviewing disk usage and removing selected regenerable cache data. It shows the proposed cleanup before anything is deleted.
@@ -37,6 +39,11 @@ For a production macOS bundle:
 cd app
 pnpm tauri build --bundles dmg
 ```
+
+The app icon comes from `deslop icon.png`. With Python 3 and Pillow installed,
+run `pnpm icons:generate` from `app/` to regenerate the transparent master,
+macOS `.icns`, Windows `.ico`, PNG sizes, and browser favicon. Commit the
+generated files together so local builds and release installers use the same icon.
 
 ## Checks
 
