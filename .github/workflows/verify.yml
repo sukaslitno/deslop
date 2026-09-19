@@ -1,0 +1,40 @@
+name: Verify Deslop
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm --dir app install --frozen-lockfile
+      - run: pnpm --dir app typecheck
+      - run: |
+          state_test_dir="$(mktemp -d)"
+          pnpm --dir app exec tsc src/lib/clean-screen-state.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir "$state_test_dir"
+          pnpm --dir app exec tsc src/lib/map-screen-state.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir "$state_test_dir"
+          pnpm --dir app exec tsc src/lib/treemap-layout.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir "$state_test_dir"
+          DESLOP_STATE_TEST_OUTPUT="$state_test_dir" node --test app/scripts/clean-screen-state.test.mjs
+          DESLOP_STATE_TEST_OUTPUT="$state_test_dir" node --test app/scripts/map-screen-state.test.mjs
+          DESLOP_STATE_TEST_OUTPUT="$state_test_dir" node --test app/scripts/treemap-layout.test.mjs
+          i18n_test_dir="$(mktemp -d)"
+          pnpm --dir app exec tsc src/i18n/messages/en.ts src/i18n/messages/ru.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir "$i18n_test_dir"
+          DESLOP_I18N_TEST_OUTPUT="$i18n_test_dir" node --test app/scripts/i18n-catalog.test.mjs
+      - run: pnpm --dir app build
+      - run: rustup component add --toolchain 1.88.0-aarch64-apple-darwin rustfmt clippy
+      - run: cargo fmt --check
+        working-directory: app/src-tauri
+      - run: cargo clippy --lib --tests -- -D warnings
+        working-directory: app/src-tauri
+      - run: cargo test --lib
+        working-directory: app/src-tauri

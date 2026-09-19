@@ -1,0 +1,79 @@
+.scan-glow {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  isolation: isolate;
+  animation: scan-glow-appear 420ms ease-out both;
+}
+
+.scan-glow__canvas {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: min(100%, 700px);
+  overflow: visible;
+}
+
+.scan-glow__layer {
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+  animation-timing-function: cubic-bezier(0.37, 0, 0.63, 1);
+  animation-iteration-count: infinite;
+}
+
+/* Staggered phases and different periods keep the light flowing rather than
+   pulsing in unison. Only transforms/opacity animate; SVG blur stays cached. */
+.scan-glow__layer--blue {
+  animation-name: scan-glow-blue;
+  animation-duration: 7.2s;
+  animation-delay: -1.8s;
+}
+
+.scan-glow__layer--aqua {
+  animation-name: scan-glow-aqua;
+  animation-duration: 8.4s;
+  animation-delay: -4.2s;
+}
+
+.scan-glow__layer--white {
+  mix-blend-mode: plus-lighter;
+  animation-name: scan-glow-white;
+  animation-duration: 5.8s;
+  animation-delay: -1.45s;
+}
+
+.scan-glow[data-paused="true"],
+.scan-glow[data-paused="true"] .scan-glow__layer {
+  animation-play-state: paused;
+}
+
+@keyframes scan-glow-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scan-glow-blue {
+  0%, 100% { transform: translate3d(32px, 8px, 0) rotate(-3deg) scale(1.08, 1.02); opacity: 0.94; }
+  50% { transform: translate3d(-80px, -12px, 0) rotate(3deg) scale(1.16, 1.08); opacity: 1; }
+}
+
+@keyframes scan-glow-aqua {
+  0%, 100% { transform: translate3d(-48px, 12px, 0) rotate(2deg) scale(1.1, 1.02); opacity: 0.9; }
+  50% { transform: translate3d(90px, -16px, 0) rotate(-3deg) scale(1.18, 1.1); opacity: 1; }
+}
+
+@keyframes scan-glow-white {
+  0%, 100% { transform: translate3d(24px, 12px, 0) rotate(-2deg) scale(1.04, 0.96); opacity: 0.82; }
+  50% { transform: translate3d(-150px, -8px, 0) rotate(2deg) scale(1.16, 1.06); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-glow,
+  .scan-glow__layer {
+    animation: none;
+    will-change: auto;
+  }
+}

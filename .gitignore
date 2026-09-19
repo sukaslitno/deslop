@@ -1,0 +1,57 @@
+# Publish only the application, its runtime assets, documentation, and CI.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/.github/
+!/.github/**
+!/app/
+!/app/**
+!/assets/
+/assets/*
+!/assets/font/
+!/assets/font/**
+!/assets/icons/
+!/assets/icons/**
+
+# Generated output and local tooling state.
+node_modules/
+dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+app/src-tauri/icons/android/
+app/src-tauri/icons/ios/
+app/src-tauri/icons/64x64.png
+app/src-tauri/icons/Square*.png
+app/src-tauri/icons/StoreLogo.png
+app/src-tauri/icons/icon.png
+app/icon-src.png
+app/icon-src-chromakey.png
+app/vendor/time/benchmarks/
+app/vendor/time/tests/
+app/vendor/time/Cargo.lock
+app/vendor/time/Cargo.toml.orig
+app/vendor/time/.cargo-ok
+app/vendor/time/.cargo_vcs_info.json
+assets/font/roobert pro/*Italic.otf
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+coverage/
+.cache/
+*.log
+
+# Never commit local configuration or credentials.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision

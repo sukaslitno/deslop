@@ -1,0 +1,94 @@
+@import "tailwindcss";
+@import "./design-system/tokens.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: var(--vc-font-text);
+  --font-numeric: var(--vc-font-numeric);
+  --radius-sm: var(--vc-radius-4);
+  --radius-md: var(--vc-radius-8);
+  --radius-lg: var(--vc-radius-14);
+  --radius-xl: var(--vc-radius-16);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-green: var(--green);
+  --color-yellow: var(--yellow);
+  --color-red: var(--red);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+    outline-color: color-mix(in oklch, var(--ring) 50%, transparent);
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--vc-font-text);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    overflow: hidden;
+  }
+}
+
+@layer utilities {
+  .font-numeric,
+  .tabular-nums {
+    font-family: var(--vc-font-numeric);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .text-style-heading {
+    font-size: var(--vc-text-heading);
+    line-height: var(--vc-leading-auto);
+  }
+
+  .text-style-body {
+    font-size: var(--vc-text-body);
+    line-height: var(--vc-leading-auto);
+  }
+
+  .text-style-body-small {
+    font-size: var(--vc-text-body-small);
+    line-height: var(--vc-leading-auto);
+  }
+
+  .text-style-caption {
+    font-size: var(--vc-text-caption);
+    line-height: var(--vc-leading-caption);
+  }
+
+  .text-style-micro {
+    font-size: var(--vc-text-micro);
+    line-height: var(--vc-leading-auto);
+  }
+
+  .text-style-numeric-large {
+    font-family: var(--vc-font-numeric);
+    font-size: var(--vc-text-numeric-large);
+    line-height: var(--vc-leading-auto);
+  }
+
+  .text-style-numeric-small {
+    font-family: var(--vc-font-numeric);
+    font-size: var(--vc-text-numeric-small);
+    line-height: var(--vc-leading-auto);
+  }
+}
