@@ -13,6 +13,17 @@ Download the latest installer from [Releases](https://github.com/sukaslitno/desl
 
 Open the matching `.dmg`, then move Deslop to Applications. The current builds are not code-signed or notarized, so macOS may require you to Control-click the app and choose **Open** the first time.
 
+To verify your download, save `checksums.txt` from the same release next to the
+installer, open Terminal in that folder, and run:
+
+```sh
+shasum -a 256 -c checksums.txt --ignore-missing
+```
+
+Your downloaded DMG must report `OK`. `--ignore-missing` skips the installer for
+the other architecture. If you downloaded both installers, verify the full set
+with `shasum -a 256 -c checksums.txt`.
+
 ## What it does
 
 - Scans exact, known cache locations and shows candidates before cleanup
