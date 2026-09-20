@@ -16,11 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const POLICY_FINGERPRINT: &str = "2026-07-27-snapshot-v1";
-const PROTECTED_FRAGMENTS: &[&str] = &[
-    "/.claude/projects",
-    "/.claude/todos",
-    "/.claude/file-history",
-    "/.codex/sessions",
+const PROTECTED_SUFFIXES: &[&[&str]] = &[
+    &[".claude", "projects"],
+    &[".claude", "todos"],
+    &[".claude", "file-history"],
+    &[".codex", "sessions"],
 ];
 const NEVER_NAMES: &[&str] = &[
     ".git",
@@ -277,10 +277,13 @@ fn expand_under_home(input: &str, home: &Path) -> PathBuf {
 }
 
 fn is_protected(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    PROTECTED_FRAGMENTS
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    PROTECTED_SUFFIXES
         .iter()
-        .any(|fragment| text == *fragment || text.starts_with(&format!("{fragment}/")))
+        .any(|needle| parts.windows(needle.len()).any(|window| window == *needle))
 }
 
 fn canonical_roots(roots: &[String], home: &Path) -> (Vec<PathBuf>, Vec<String>) {
@@ -2213,6 +2216,20 @@ mod tests {
             restore: None,
             policy_fingerprint: POLICY_FINGERPRINT.into(),
         }
+    }
+    #[test]
+    fn protected_fragments_match_real_absolute_paths() {
+        let home = Path::new("/Users/tester");
+        assert!(is_protected(&home.join(".claude/projects")));
+        assert!(is_protected(&home.join(".claude/projects/deep/nested")));
+        assert!(is_protected(&home.join(".claude/todos")));
+        assert!(is_protected(&home.join(".claude/file-history")));
+        assert!(is_protected(&home.join(".codex/sessions")));
+        assert!(is_protected(&home.join(".codex/sessions/deep/nested")));
+        assert!(!is_protected(&home.join(".claude/logs")));
+        assert!(!is_protected(&home.join(".claude-backup/projects")));
+        assert!(!is_protected(&home.join(".claude/projects-backup")));
+        assert!(!is_protected(&home.join(".codex/sessions-backup")));
     }
     #[test]
     fn home_fails_closed_when_unavailable() {
