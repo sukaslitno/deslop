@@ -1046,7 +1046,7 @@ fn running_apps_for_rule(rule_id: &str) -> Vec<String> {
 }
 
 #[tauri::command]
-fn clean(
+async fn clean(
     state: tauri::State<'_, AppState>,
     preflight_id: String,
     confirm_yellow: bool,
