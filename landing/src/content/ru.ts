@@ -7,10 +7,10 @@ export const ru: LandingContent = {
   },
   header: { locale: "RU", localeLabel: "Выбрать язык", switchTo: "EN", download: "Скачать" },
   hero: {
-    lineOne: "Не копи слоп,",
+    lineOne: "Не копи шлоп,",
     lineTwoBeforeDisk: "управляй",
     lineTwoAfterDisk: "хранилищем",
-    accessibleTitle: "Не копи слоп, управляй хранилищем",
+    accessibleTitle: "Не копи шлоп, управляй хранилищем",
     subtitle: "Находит шлоп, показывает карту диска\nи чистит кэши по расписанию",
     download: "Скачать",
     github: "GitHub",

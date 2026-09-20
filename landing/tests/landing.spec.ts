@@ -8,7 +8,7 @@ test.use({ reducedMotion: "reduce" });
 
 const localOrigin = process.env.LANDING_URL ?? "http://127.0.0.1:4321";
 const routes = [
-  { path: "/", locale: "ru", hero: "Не копи слоп, управляй хранилищем", feature: "Ничего лишнего — зато сколько гибкости (и бесплатно!)", firstCard: "Разбирает шлоп по категориям. Лишнее выбираете сами" },
+  { path: "/", locale: "ru", hero: "Не копи шлоп, управляй хранилищем", feature: "Ничего лишнего — зато сколько гибкости (и бесплатно!)", firstCard: "Разбирает шлоп по категориям. Лишнее выбираете сами" },
   { path: "/en/", locale: "en", hero: "Don’t hoard slop, take charge of storage", feature: "Nothing extra — but so much freedom (and it’s free!)", firstCard: "Sorts slop by category. You pick what goes" },
 ] as const;
 const widths = [360, 375, 390, 414, 479, 480, 481, 767, 768, 769, 1023, 1024, 1025, 1279, 1280, 1281, 1366, 1439, 1440, 1441, 1536, 1919, 1920];
@@ -148,7 +148,7 @@ test("keeps content and fallback download links available without JavaScript", a
   const { page, close } = await newPage(browser, { javaScriptEnabled: false, viewport: { width: 390, height: 844 } });
   try {
     await goto(page, "/");
-    await expect(page.getByRole("heading", { level: 1, name: "Не копи слоп, управляй хранилищем" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Не копи шлоп, управляй хранилищем" })).toBeVisible();
     await expect(page.locator(".feature-card")).toHaveCount(3);
     await expect(page.locator("#download-options")).toBeVisible();
     await expect(page.locator(".download-fallback__mobile-context")).toHaveText("А зачем качать с мобилы?");
