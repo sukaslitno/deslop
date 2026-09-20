@@ -1,0 +1,45 @@
+---
+import "../styles/base.css";
+import "../styles/responsive.css";
+import { site } from "../config/site";
+
+interface Props {
+  lang: "ru" | "en";
+  title: string;
+  description: string;
+  canonicalPath: string;
+}
+
+const { lang, title, description, canonicalPath } = Astro.props;
+const origin = Astro.site ? new URL(Astro.site) : undefined;
+const isIndexable = Boolean(origin) && process.env.VERCEL_ENV !== "preview";
+const canonical = isIndexable && origin ? new URL(canonicalPath, origin) : undefined;
+const socialImage = canonical && origin ? new URL("/brand/og.png", origin) : undefined;
+---
+
+<!doctype html>
+<html lang={lang}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101010" />
+    <link rel="icon" href={`${site.assetOrigin}/landing-v2/assets/hero-imgFrame1.svg`} type="image/svg+xml" />
+    <link rel="preload" href={`${site.assetOrigin}/fonts/RoobertPRO-Medium.woff2`} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={`${site.assetOrigin}/landing-v2/fonts/RoobertPRO-SemiBold.woff2`} as="font" type="font/woff2" crossorigin />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    {canonical && <meta property="og:url" content={canonical.toString()} />}
+    {socialImage && <meta property="og:image" content={socialImage.toString()} />}
+    <meta name="twitter:card" content="summary" />
+    {canonical ? <link rel="canonical" href={canonical} /> : <meta name="robots" content="noindex,nofollow" />}
+    {canonical && origin && <link rel="alternate" hreflang="ru" href={new URL("/", origin)} />}
+    {canonical && origin && <link rel="alternate" hreflang="en" href={new URL("/en/", origin)} />}
+    {canonical && origin && <link rel="alternate" hreflang="x-default" href={new URL("/", origin)} />}
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

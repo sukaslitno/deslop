@@ -1,0 +1,69 @@
+/* Generated from the shared application tokens by scripts/sync-design-tokens.mjs. */
+@import "./generated-tokens.css";
+
+:root {
+  /* Source: landing-v2 Figma canvas. These roles deliberately derive from the
+     shipped Deslop tokens rather than adding a second palette. */
+  --landing-canvas: rgb(from var(--vc-surface-background) calc(r * 0.7273) calc(g * 0.7273) calc(b * 0.7273));
+  --landing-text-strong: #ffffff;
+  --landing-overlay: rgb(from var(--landing-canvas) 0 0 0 / 90%);
+  --landing-page-gutter: var(--vc-gap-16);
+  --landing-content-width: 1040px;
+  --landing-card-radius: var(--vc-radius-48);
+}
+
+@font-face {
+  font-family: "Roobert Pro";
+  src: url("https://deslop-landing.vercel.app/fonts/RoobertPRO-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Roobert Pro";
+  src: url("https://deslop-landing.vercel.app/landing-v2/fonts/RoobertPRO-Light.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Roobert Pro";
+  src: url("https://deslop-landing.vercel.app/fonts/RoobertPRO-Medium.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Roobert Pro";
+  src: url("https://deslop-landing.vercel.app/landing-v2/fonts/RoobertPRO-SemiBold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Roobert Pro";
+  src: url("https://deslop-landing.vercel.app/landing-v2/fonts/RoobertPRO-RegularItalic.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Roobert Pro";
+  src: url("https://deslop-landing.vercel.app/landing-v2/fonts/RoobertPRO-SemiBoldItalic.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "NDot 57";
+  src: url("https://deslop-landing.vercel.app/fonts/Ndot57-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}

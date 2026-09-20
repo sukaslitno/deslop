@@ -1,0 +1,113 @@
+/* Generated from app/src/design-system/tokens.css. Source SHA-256: 0ff8cbeeb0ae7dbece7bbc5230baca32464b04832be80039fe160e5299761b3a. Do not edit manually. */
+:root {
+  /* Typography source: assets/font (Figma text styles). */
+  --vc-font-text: "Roobert Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --vc-font-numeric: "NDot 57", "SF Mono", ui-monospace, monospace;
+  --vc-text-heading: 20px;
+  --vc-text-body: 16px;
+  --vc-text-body-small: 14px;
+  --vc-text-caption: 12px;
+  --vc-text-micro: 8px;
+  --vc-text-numeric-large: 24px;
+  --vc-text-numeric-small: 20px;
+  --vc-leading-auto: 1;
+  --vc-leading-caption: 1.4;
+
+  /* Raw palette */
+  --vc-color-aqua: #68d0ed;
+  --vc-color-green: #71c86a;
+  --vc-color-purple: #b76ac8;
+  --vc-color-blue: #0798f1;
+  --vc-color-orange: #e47202;
+  --vc-color-white: #f4f2f3;
+  --vc-color-dark-aqua: #2a3539;
+
+  /* Raw text and surface tokens */
+  --vc-text-primary: #f4f2f3;
+  --vc-text-secondary: #9d9d9d;
+  --vc-text-disabled: #696969;
+  --vc-text-inverse: #161616;
+  --vc-surface-background: #161616;
+  --vc-surface-foreground: #222021;
+  --vc-surface-active: #373737;
+
+  /* Raw status tokens */
+  --vc-success: #71c86a;
+  --vc-success-foreground: #2c342a;
+  --vc-warning: #e47202;
+  --vc-warning-foreground: #392a1d;
+  --vc-danger: #cd3232;
+  --vc-danger-foreground: #372223;
+
+  /* Figma Gap scale */
+  --vc-gap-0: 0px;
+  --vc-gap-2: 2px;
+  --vc-gap-4: 4px;
+  --vc-gap-8: 8px;
+  --vc-gap-16: 16px;
+  --vc-gap-24: 24px;
+  --vc-gap-32: 32px;
+  --vc-gap-48: 48px;
+  --vc-gap-64: 64px;
+
+  /* Figma Radius scale */
+  --vc-radius-0: 0px;
+  --vc-radius-2: 2px;
+  --vc-radius-4: 4px;
+  --vc-radius-8: 8px;
+  --vc-radius-14: 14px;
+  --vc-radius-16: 16px;
+  --vc-radius-24: 24px;
+  --vc-radius-32: 32px;
+  --vc-radius-48: 48px;
+  --vc-radius-64: 64px;
+  --vc-radius-full: 9999px;
+  --vc-corner-smoothing: 60%;
+
+  /* Semantic aliases: no new colors, only source-token combinations. */
+  --vc-action-primary: var(--vc-color-aqua);
+  --vc-action-primary-foreground: var(--vc-text-inverse);
+  --vc-action-secondary: var(--vc-surface-active);
+  --vc-action-danger: var(--vc-danger);
+  --vc-border-subtle: color-mix(in srgb, var(--vc-text-primary) 12%, transparent);
+  --vc-border-strong: color-mix(in srgb, var(--vc-text-primary) 24%, transparent);
+  --vc-focus-ring: color-mix(in srgb, var(--vc-color-aqua) 62%, transparent);
+  --vc-overlay: color-mix(in srgb, var(--vc-surface-background) 86%, transparent);
+
+  /* Disk-map nesting, Figma 10:4440. Shades derive from the supplied purple. */
+  --vc-map-depth-0: var(--vc-color-dark-aqua);
+  --vc-map-depth-1: var(--vc-color-purple);
+  --vc-map-depth-2: rgb(from var(--vc-color-purple) calc(r * 0.825) calc(g * 0.802) calc(b * 0.83));
+  --vc-map-depth-3: rgb(from var(--vc-color-purple) calc(r * 0.689) calc(g * 0.802) calc(b * 0.83));
+  --vc-map-depth-4: rgb(from var(--vc-color-purple) calc(r * 0.541) calc(g * 0.632) calc(b * 0.655));
+  --vc-map-selected: var(--vc-text-primary);
+  --vc-map-selected-label: var(--vc-text-inverse);
+
+  /* Compatibility aliases for existing utility classes. New work uses --vc-* names. */
+  --background: var(--vc-surface-background);
+  --foreground: var(--vc-text-primary);
+  --card: var(--vc-surface-foreground);
+  --card-foreground: var(--vc-text-primary);
+  --popover: var(--vc-surface-foreground);
+  --popover-foreground: var(--vc-text-primary);
+  --primary: var(--vc-action-primary);
+  --primary-foreground: var(--vc-action-primary-foreground);
+  --secondary: var(--vc-surface-active);
+  --secondary-foreground: var(--vc-text-primary);
+  --muted: var(--vc-surface-foreground);
+  --muted-foreground: var(--vc-text-secondary);
+  --accent: var(--vc-surface-active);
+  --accent-foreground: var(--vc-text-primary);
+  --destructive: var(--vc-action-danger);
+  --border: var(--vc-border-subtle);
+  --input: var(--vc-border-strong);
+  --ring: var(--vc-focus-ring);
+  --green: var(--vc-success);
+  --yellow: var(--vc-warning);
+  --red: var(--vc-danger);
+}
+
+.vc-corner-smooth {}
+@supports (corner-shape: superellipse(1.6)) {
+  .vc-corner-smooth { corner-shape: superellipse(1.6); }
+}

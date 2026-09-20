@@ -1,0 +1,13 @@
+# Upload only this standalone landing project; never upload local runtime/test state.
+node_modules
+dist
+.astro
+.vercel
+test-results
+playwright-report
+tests
+playwright.config.ts
+.env
+.env.*
+*.log
+.DS_Store

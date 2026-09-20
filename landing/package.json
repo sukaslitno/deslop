@@ -1,0 +1,29 @@
+{
+  "name": "deslop-landing",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=20.20.0",
+    "pnpm": ">=10.33.4"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1 --port 4321",
+    "typecheck": "astro check",
+    "prebuild": "node scripts/sync-design-tokens.mjs",
+    "build": "astro build",
+    "preview": "astro preview --host 127.0.0.1 --port 4321",
+    "test:content": "node scripts/verify-content.mjs",
+    "test:ui": "playwright test",
+    "generate:og": "node scripts/generate-og.mjs"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.4",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.2",
+    "astro": "^5.16.6",
+    "sharp": "^0.35.4",
+    "typescript": "^5.7.3"
+  }
+}

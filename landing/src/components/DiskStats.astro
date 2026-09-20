@@ -1,0 +1,74 @@
+---
+import { site } from "../config/site";
+import type { LandingContent, Locale } from "../content/types";
+
+interface Props { content: LandingContent["stats"]; locale: Locale; }
+
+const { content, locale } = Astro.props;
+const asset = (file: string) => `${site.assetOrigin}/landing-v2/assets/${file}`;
+---
+
+<section class="disk-stats landing__container vc-corner-smooth" aria-label={content.accessibleLabel} data-motion="disk" data-disk-locale={locale}>
+  <div class="disk-stats__header">
+    <div class="disk-stats__identity">
+      <span class="drive-tile vc-corner-smooth"><img src={asset("hero-imgFrame2.svg")} alt="" width="32" height="32" /></span>
+      <div>
+        <p>{content.computerName}</p>
+        <div class="disk-stats__numbers">
+          <strong><span class="disk-number" data-disk-original={content.used} role="img" aria-label={content.used}><span data-disk-value="used">{content.used}</span></span></strong>
+          <span>/</span><em>{content.total}</em>
+        </div>
+      </div>
+    </div>
+    <p class="disk-stats__scan"><img src={asset("hero-imgTimeIcon.svg")} alt="" width="16" height="16" />{content.lastScan}</p>
+  </div>
+  <div class="disk-progress vc-corner-smooth" aria-hidden="true">
+    <span class="disk-progress__base vc-corner-smooth"></span>
+    <span class="disk-progress__green vc-corner-smooth" data-disk-bar></span>
+    <span class="disk-progress__blue vc-corner-smooth" data-disk-bar></span>
+    <span class="disk-progress__orange vc-corner-smooth" data-disk-bar></span>
+    <span class="disk-progress__white vc-corner-smooth" data-disk-bar></span>
+  </div>
+  <ul class="disk-stats__legend" aria-label={content.legendLabel}>
+    {content.legend.map((item, index) => <li><img src={asset(`hero-imgFrame${index + 3}.svg`)} alt="" width="16" height="16" /><span>{item.label}{item.separator === ":" ? <>:&nbsp;</> : <>&nbsp;·&nbsp;</>}<span class="disk-number" data-disk-original={item.value} role="img" aria-label={item.value}><span data-disk-value="cache">{item.value}</span></span></span></li>)}
+  </ul>
+</section>
+
+<script src="../scripts/disk-motion.ts"></script>
+
+<style>
+  /* Preserve each initial text width so counting never nudges adjacent labels. */
+  .disk-number { display: inline-grid; vertical-align: baseline; }
+  .disk-number::after { content: attr(data-disk-original); visibility: hidden; }
+  .disk-number::after, .disk-number > span { grid-area: 1 / 1; }
+
+  /* Width changes are isolated to this tiny track. Unlike scaleX, native width
+     interpolation preserves the supplied rounded ends at every size. */
+  .disk-stats .disk-progress { gap: 0; contain: layout paint; }
+  .disk-stats .disk-progress > span { flex: 0 0 auto; min-width: 0; }
+  .disk-stats .disk-progress > [data-disk-bar] {
+    width: var(--disk-segment-width);
+    margin-inline-start: var(--vc-gap-2);
+  }
+  .disk-progress__green { --disk-segment-width: 56px; }
+  .disk-progress__blue { --disk-segment-width: 36px; }
+  .disk-progress__orange { --disk-segment-width: 21px; }
+  .disk-progress__white { --disk-segment-width: 6px; }
+
+  @media (max-width: 900px) {
+    /* Keep the gray used-space segment stationary as caches are removed. */
+    .disk-stats .disk-progress > .disk-progress__base { width: calc(100% - 127px); }
+  }
+  @media (max-width: 767px) {
+    .disk-stats .disk-progress > .disk-progress__base { width: 140px; }
+  }
+  @media (max-width: 389px) {
+    /* Percentages resolve against the live track even during an animation, so
+       rotating/resizing the viewport cannot freeze old pixel measurements. */
+    .disk-stats .disk-progress > .disk-progress__base { width: calc((100% - var(--vc-gap-8)) * 140 / 259); }
+    .disk-progress__green { --disk-segment-width: calc((100% - var(--vc-gap-8)) * 56 / 259); }
+    .disk-progress__blue { --disk-segment-width: calc((100% - var(--vc-gap-8)) * 36 / 259); }
+    .disk-progress__orange { --disk-segment-width: calc((100% - var(--vc-gap-8)) * 21 / 259); }
+    .disk-progress__white { --disk-segment-width: calc((100% - var(--vc-gap-8)) * 6 / 259); }
+  }
+</style>

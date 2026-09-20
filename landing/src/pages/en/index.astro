@@ -1,0 +1,9 @@
+---
+import LandingLayout from "../../layouts/LandingLayout.astro";
+import LandingPage from "../../components/LandingPage.astro";
+import { en } from "../../content/en";
+---
+
+<LandingLayout lang="en" title={en.meta.title} description={en.meta.description} canonicalPath="/en/">
+  <LandingPage content={en} locale="en" />
+</LandingLayout>

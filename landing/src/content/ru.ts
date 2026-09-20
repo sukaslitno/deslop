@@ -1,0 +1,71 @@
+import type { LandingContent } from "./types";
+
+export const ru: LandingContent = {
+  meta: {
+    title: "Deslop — очистка кэшей и карта диска",
+    description: "Находит шлоп в кэшах, показывает карту диска и чистит выбранное по расписанию.",
+  },
+  header: { locale: "RU", localeLabel: "Выбрать язык", switchTo: "EN", download: "Скачать" },
+  hero: {
+    lineOne: "Не копи слоп,",
+    lineTwoBeforeDisk: "управляй",
+    lineTwoAfterDisk: "хранилищем",
+    accessibleTitle: "Не копи слоп, управляй хранилищем",
+    subtitle: "Находит шлоп, показывает карту диска\nи чистит кэши по расписанию",
+    download: "Скачать",
+    github: "GitHub",
+  },
+  stats: {
+    computerName: "Компик",
+    used: "60,1 GB",
+    total: "245,1 GB",
+    lastScan: "Последний скан: 16 минут назад",
+    accessibleLabel: "Пример интерфейса Deslop со статичными данными о диске",
+    legendLabel: "Демонстрационные категории",
+    legend: [
+      { label: "Кэши агентов", value: "1,9 GB", separator: ":" },
+      { label: "Кэши пакетов", value: "1,9 GB", separator: ":" },
+      { label: "Кэши приложений", value: "42,3 MB", separator: "·" },
+      { label: "Кэши моделей", value: "42,3 MB", separator: "·" },
+    ],
+  },
+  features: {
+    headingFirst: "Ничего лишнего —",
+    headingSecond: "зато сколько гибкости",
+    headingAccent: "(и бесплатно!)",
+    accessibleLabel: "Возможности Deslop",
+    cards: [
+      { title: "Очистка", description: "Разбирает шлоп по категориям. Лишнее выбираете сами", icon: "features-imgFeatureIcon.svg" },
+      { title: "Карта", description: "Показывает крупных виновников. Ничего не удаляет", icon: "features-imgFeatureIcon1.svg" },
+      { title: "Автоматизации", description: "По расписанию чистит кэши. Сессии и проекты — мимо", icon: "features-imgFeatureIcon2.svg" },
+    ],
+  },
+  screen: {
+    alt: "Результаты очистки диска в Deslop",
+    mobileBefore: "тут на мобиле\nвидно вообще что-то?",
+    mobileAfter: "сори, адаптивы\nделать не учили",
+  },
+  cta: {
+    lineOneBeforeOs: "Скачать на",
+    lineOneAfterOs: "Мак",
+    lineTwoBeforeOs: "Винда",
+    lineTwoAfterOs: "позже",
+    accessibleTitle: "Скачать на Мак. Винда — позже",
+    download: "Скачать",
+    aside: "... и еще чуть-чуть",
+  },
+  dialog: {
+    title: "Какая у вас система?",
+    mobileIntroTitle: "А зачем качать с мобилы?",
+    mobileContinue: "Я хз... хочу так",
+    mobilePlatformsTitle: "Не, ну если СИЛЬНО надо...",
+    close: "Закрыть",
+    mac: "Мак",
+    windows: "Винда",
+    unavailable: "Установщики появятся позже",
+    releaseLink: "Страница релизов",
+    fallbackTitle: "Выберите систему для будущей загрузки",
+  },
+  links: { github: "GitHub", donate: "Донат", telegram: "Канал", betaChat: "Чат тестеров", unavailable: "Ссылка появится позже" },
+  footer: { firstLine: "2026. jeneverbes", secondPrefix: "я хз что тут еще пишут... ", secondItalic: "спасибо??" },
+};

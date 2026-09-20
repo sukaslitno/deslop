@@ -1,0 +1,71 @@
+import type { LandingContent } from "./types";
+
+export const en: LandingContent = {
+  meta: {
+    title: "Deslop — cache cleanup and disk map",
+    description: "Finds cache slop, maps your drive, and cleans caches on a schedule.",
+  },
+  header: { locale: "EN", localeLabel: "Choose language", switchTo: "RU", download: "Download" },
+  hero: {
+    lineOne: "Don’t hoard slop,",
+    lineTwoBeforeDisk: "take charge of",
+    lineTwoAfterDisk: "storage",
+    accessibleTitle: "Don’t hoard slop, take charge of storage",
+    subtitle: "Finds cache slop, maps your drive\nand cleans caches on a schedule",
+    download: "Download",
+    github: "GitHub",
+  },
+  stats: {
+    computerName: "My computer",
+    used: "60.1 GB",
+    total: "245.1 GB",
+    lastScan: "Last scan: 16 minutes ago",
+    accessibleLabel: "Static Deslop disk interface example",
+    legendLabel: "Demo categories",
+    legend: [
+      { label: "Agent caches", value: "1.9 GB", separator: ":" },
+      { label: "Package caches", value: "1.9 GB", separator: ":" },
+      { label: "App caches", value: "42.3 MB", separator: "·" },
+      { label: "Model caches", value: "42.3 MB", separator: "·" },
+    ],
+  },
+  features: {
+    headingFirst: "Nothing extra —",
+    headingSecond: "but so much freedom",
+    headingAccent: "(and it’s free!)",
+    accessibleLabel: "Deslop features",
+    cards: [
+      { title: "Cleanup", description: "Sorts slop by category. You pick what goes", icon: "features-imgFeatureIcon.svg" },
+      { title: "Map", description: "Shows the biggest culprits. Deletes nothing", icon: "features-imgFeatureIcon1.svg" },
+      { title: "Automations", description: "Cleans selected caches on a schedule. Sessions and projects stay out", icon: "features-imgFeatureIcon2.svg" },
+    ],
+  },
+  screen: {
+    alt: "Disk cleanup results in Deslop",
+    mobileBefore: "can you see\nanything on mobile?",
+    mobileAfter: "sorry, responsive\ndesign wasn't taught",
+  },
+  cta: {
+    lineOneBeforeOs: "Download for",
+    lineOneAfterOs: "Mac",
+    lineTwoBeforeOs: "Windows",
+    lineTwoAfterOs: "later",
+    accessibleTitle: "Download for Mac. Windows later",
+    download: "Download",
+    aside: "... and a little more",
+  },
+  dialog: {
+    title: "What system do you use?",
+    mobileIntroTitle: "Why download from mobile?",
+    mobileContinue: "I dunno... I want to",
+    mobilePlatformsTitle: "Well, if you really need it...",
+    close: "Close",
+    mac: "Mac",
+    windows: "Windows",
+    unavailable: "Installers will arrive later",
+    releaseLink: "Releases page",
+    fallbackTitle: "Choose a system for a future download",
+  },
+  links: { github: "GitHub", donate: "Donate", telegram: "Channel", betaChat: "Testers chat", unavailable: "Link coming later" },
+  footer: { firstLine: "2026. jeneverbes", secondPrefix: "what else goes here... ", secondItalic: "thanks??" },
+};

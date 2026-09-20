@@ -14,6 +14,8 @@
 !/assets/font/**
 !/assets/icons/
 !/assets/icons/**
+!/landing/
+!/landing/**
 
 # Generated output and local tooling state.
 node_modules/
@@ -46,6 +48,10 @@ Thumbs.db
 coverage/
 .cache/
 *.log
+landing/test-results/
+landing/playwright-report/
+landing/.astro/
+landing/.vercel/
 
 # Never commit local configuration or credentials.
 .env

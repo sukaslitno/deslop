@@ -1,0 +1,99 @@
+---
+import { releases } from "../config/releases";
+import DiskStats from "./DiskStats.astro";
+import BrushMotion from "./BrushMotion.astro";
+import MapMotion from "./MapMotion.astro";
+import AlarmMotion from "./AlarmMotion.astro";
+import { getDownloadAvailability, releaseFixtures } from "../config/releaseAvailability";
+import { site } from "../config/site";
+import type { LandingContent, Locale } from "../content/types";
+
+interface Props { content: LandingContent; locale: Locale; fixtureName?: string; }
+
+const { content, locale, fixtureName } = Astro.props;
+const asset = (file: string) => `${site.assetOrigin}/landing-v2/assets/${file}`;
+const mobileAsset = (file: string) => `${site.assetOrigin}/landing-v2/mobile/${file}`;
+const localePath = locale === "ru" ? "/en/" : "/";
+const fixtureReleases = fixtureName && fixtureName in releaseFixtures ? releaseFixtures[fixtureName as keyof typeof releaseFixtures] : releases;
+const { macReleases, windowsReleases, macAvailable, windowsAvailable, macOption, windowsOption } = getDownloadAvailability(fixtureReleases);
+const socialLinks = [
+  { key: "github", label: content.links.github, icon: "cta-imgIc16Github.svg", href: site.github },
+  { key: "donate", label: content.links.donate, icon: "cta-imgIc16Donate.svg", href: site.donate },
+  { key: "telegram", label: content.links.telegram, icon: "cta-imgIc16Telegram.svg", href: site.telegram },
+  { key: "beta-chat", label: content.links.betaChat, icon: "cta-imgIc16Chat.svg", href: site.betaChat },
+] as const;
+---
+
+<main class="landing-shell" id="main-content" data-locale={locale}>
+  <section class="hero-section" aria-labelledby="hero-title">
+    <header class="site-header landing__container" aria-label="Deslop">
+      <a class="brand" href={locale === "ru" ? "/" : "/en/"} aria-label="Deslop">
+        <picture class="brand__drive"><source media="(max-width: 767px)" srcset={mobileAsset("hero-logo-drive.svg")} /><img src={asset("hero-imgFrame1.svg")} alt="" width="44" height="44" /></picture>
+        <picture><source media="(max-width: 767px)" srcset={mobileAsset("hero-wordmark.svg")} /><img class="brand__wordmark" src={asset("hero-wordmark.svg")} alt="Deslop" width="116" height="23" /></picture>
+      </a>
+      <div class="site-header__actions">
+        <a class="small-control vc-corner-smooth" href={localePath} hreflang={locale === "ru" ? "en" : "ru"} lang={locale === "ru" ? "en" : "ru"} aria-label={`${content.header.localeLabel}: ${content.header.switchTo}`}>{content.header.locale}</a>
+        <a class="small-control small-control--download vc-corner-smooth" href="#download-options" data-download-trigger aria-label={content.header.download}>
+          <picture><source media="(max-width: 767px)" srcset={mobileAsset("hero-header-download.svg")} /><img src={asset("hero-imgIc16Download1.svg")} alt="" width="16" height="16" /></picture><span class="small-control__label">{content.header.download}</span>
+        </a>
+      </div>
+    </header>
+
+    <div class="hero-copy">
+      <h1 id="hero-title" aria-label={content.hero.accessibleTitle}>
+        <span>{content.hero.lineOne}</span>
+        <span class="hero-copy__line"><span>{content.hero.lineTwoBeforeDisk}</span><picture class="hero-copy__disk"><source media="(max-width: 767px)" srcset={mobileAsset("hero-inline-disk.svg")} /><img src={asset("hero-imgFrame.svg")} alt="" width="100" height="100" /></picture><span>{content.hero.lineTwoAfterDisk}</span></span>
+      </h1>
+      <p>{content.hero.subtitle}</p>
+      <div class="hero-copy__actions">
+        <a class="landing-button landing-button--aqua vc-corner-smooth" href="#download-options" data-download-trigger><span class="download-icon"><img class="download-icon__dark" src={asset("hero-imgIc16Download.svg")} alt="" width="16" height="16" /><img class="download-icon__light" src={asset("hero-imgIc16Download1.svg")} alt="" width="16" height="16" /></span>{content.hero.download}</a>
+        <a class="landing-button landing-button--gray vc-corner-smooth" href={site.github} target="_blank" rel="noopener noreferrer"><img src={asset("hero-imgIc16Github.svg")} alt="" width="16" height="16" />{content.hero.github}</a>
+      </div>
+    </div>
+
+    <DiskStats content={content.stats} locale={locale} />
+  </section>
+
+  <section class="features-section" aria-labelledby="features-title">
+    <h2 id="features-title"><span>{content.features.headingFirst}</span><span>{content.features.headingSecond} <em>{content.features.headingAccent}</em></span></h2>
+    <div class="feature-cards landing__container" aria-label={content.features.accessibleLabel}>
+      {content.features.cards.map((card, index) => <article class="feature-card vc-corner-smooth"><div class="feature-card__copy"><h3>{card.title}</h3><p>{card.description}</p></div>{index === 0 ? <BrushMotion /> : index === 1 ? <MapMotion /> : <AlarmMotion />}</article>)}
+    </div>
+  </section>
+
+  <section class="screen-section landing__container" aria-label={content.screen.alt}>
+    <p class="screen-section__mobile-copy screen-section__mobile-copy--before">{content.screen.mobileBefore}</p>
+    <picture><source media="(max-width: 767px)" srcset={`${mobileAsset("screen-results-342.webp")} 342w, ${mobileAsset("screen-results-684.webp")} 684w, ${mobileAsset("screen-results-1026.webp")} 1026w`} sizes="(max-width: 767px) calc(100vw - 48px)" type="image/webp" /><source srcset={asset("screen-img-2080.webp")} type="image/webp" /><img src={asset("screen-img.png")} width="1040" height="700" loading="lazy" decoding="async" alt={content.screen.alt} /></picture>
+    <p class="screen-section__mobile-copy screen-section__mobile-copy--after">{content.screen.mobileAfter}</p>
+  </section>
+
+  <section class="cta-section" aria-labelledby="cta-title">
+    <h2 id="cta-title" aria-label={content.cta.accessibleTitle}><span><span class="cta-copy">{content.cta.lineOneBeforeOs}</span><picture class="os-logo os-logo--apple"><source media="(max-width: 767px)" srcset={mobileAsset("cta-apple.svg")} /><img src={asset("cta-imgFrame.svg")} alt="" width="42" height="42" /></picture><span class="cta-copy">{content.cta.lineOneAfterOs}</span></span><span><span class="cta-copy">{content.cta.lineTwoBeforeOs}</span><picture class="os-logo os-logo--windows"><source media="(max-width: 767px)" srcset={mobileAsset("cta-windows.svg")} /><img src={asset("cta-imgFrame1.svg")} alt="" width="52" height="52" /></picture><span class="cta-copy">{content.cta.lineTwoAfterOs}</span></span></h2>
+    <a class="giant-download vc-corner-smooth" href="#download-options" data-download-trigger><span class="giant-download-icon"><picture class="giant-download-icon__dark"><source media="(max-width: 767px)" srcset={mobileAsset("cta-download.svg")} /><img src={asset("cta-imgDownloadIcon.svg")} alt="" width="64" height="64" /></picture><img class="giant-download-icon__light" src={asset("hero-imgIc16Download1.svg")} alt="" width="64" height="64" /></span><span>{content.cta.download}</span></a>
+    <p class="cta-section__aside">{content.cta.aside}</p>
+    <nav class="social-links" aria-label={locale === "ru" ? "Сообщество" : "Community"}>
+      {socialLinks.map((link) => link.href ? <a class:list={["social-link", `social-link--${link.key}`, "vc-corner-smooth"]} href={link.href} target="_blank" rel="noopener noreferrer"><img src={asset(link.icon)} alt="" width="16" height="16" />{link.label}</a> : <button class:list={["social-link", `social-link--${link.key}`, "is-unavailable", "vc-corner-smooth"]} type="button" disabled><img src={asset(link.icon)} alt="" width="16" height="16" />{link.label}<span class="sr-only">: {content.links.unavailable}</span></button>)}
+    </nav>
+  </section>
+
+  <footer class="site-footer" id="footer"><p>{content.footer.firstLine}</p><p>{content.footer.secondPrefix}<em>{content.footer.secondItalic}</em></p></footer>
+</main>
+
+<dialog class="download-dialog vc-corner-smooth" aria-labelledby="download-dialog-title" data-download-dialog>
+  <div class="download-dialog__inner vc-corner-smooth">
+    <span class="focus-sentinel" tabindex="0" data-focus-start></span>
+    <div class="download-dialog__header"><h2 id="download-dialog-title" tabindex="-1"><span data-dialog-title="desktop">{content.dialog.title}</span><span data-dialog-title="mobile-intro" hidden>{content.dialog.mobileIntroTitle}</span><span data-dialog-title="mobile-platforms" hidden>{content.dialog.mobilePlatformsTitle}</span></h2><button class="dialog-close vc-corner-smooth" type="button" data-download-close aria-label={content.dialog.close}><img src={asset("modal-imgIc16X.svg")} alt="" width="24" height="24" /></button></div>
+    <button class="dialog-option dialog-mobile-continue vc-corner-smooth" type="button" data-mobile-continue hidden>{content.dialog.mobileContinue}</button>
+    <div class="download-dialog__choices" data-download-choices>
+      {macOption.mode === "architecture" ? <details class="architecture-choice"><summary class="dialog-option dialog-option--available vc-corner-smooth"><img src={asset("modal-imgFrame.svg")} alt="" width="16" height="16" /><span>{content.dialog.mac}</span><span class="architecture-choice__hint">⌄</span></summary><div class="architecture-choice__links">{macOption.releases.map((release) => <a class="vc-corner-smooth" href={release.url} data-download-platform="macos" data-download-architecture={release.architecture}>{release.architecture === "apple-silicon" ? "Apple Silicon" : "Intel"}</a>)}</div></details> : macOption.mode === "link" ? <a class="dialog-option vc-corner-smooth" href={macOption.href} data-download-platform="macos" data-download-architecture={macOption.releases[0]?.architecture}><img src={asset("modal-imgFrame.svg")} alt="" width="16" height="16" /><span>{content.dialog.mac}</span></a> : <button class="dialog-option vc-corner-smooth" type="button" disabled data-download-platform="macos"><img src={asset("modal-imgFrame.svg")} alt="" width="16" height="16" /><span>{content.dialog.mac}</span></button>}
+      {windowsOption.mode === "architecture" ? <details class="architecture-choice"><summary class="dialog-option dialog-option--available vc-corner-smooth"><img src={asset("modal-imgFrame1.svg")} alt="" width="16" height="16" /><span>{content.dialog.windows}</span><span class="architecture-choice__hint">⌄</span></summary><div class="architecture-choice__links">{windowsOption.releases.map((release) => <a class="vc-corner-smooth" href={release.url} data-download-platform="windows" data-download-architecture={release.architecture}>{release.architecture}</a>)}</div></details> : windowsOption.mode === "link" ? <a class="dialog-option vc-corner-smooth" href={windowsOption.href} data-download-platform="windows" data-download-architecture={windowsOption.releases[0]?.architecture}><img src={asset("modal-imgFrame1.svg")} alt="" width="16" height="16" /><span>{content.dialog.windows}</span></a> : <button class="dialog-option vc-corner-smooth" type="button" disabled data-download-platform="windows"><img src={asset("modal-imgFrame1.svg")} alt="" width="16" height="16" /><span>{content.dialog.windows}</span></button>}
+    </div>
+    {!macAvailable && <p class="download-dialog__notice" data-download-notice>{content.dialog.mac}: {content.dialog.unavailable} <a href={site.releases} target="_blank" rel="noopener noreferrer">{content.dialog.releaseLink}</a></p>}
+    {!windowsAvailable && <p class="download-dialog__notice" data-download-notice>{content.dialog.windows}: {content.dialog.unavailable} <a href={site.releases} target="_blank" rel="noopener noreferrer">{content.dialog.releaseLink}</a></p>}
+    <span class="focus-sentinel" tabindex="0" data-focus-end></span>
+  </div>
+</dialog>
+
+<noscript><section class="download-fallback" id="download-options" aria-labelledby="download-fallback-title"><h2 id="download-fallback-title">{content.dialog.fallbackTitle}</h2><p class="download-fallback__mobile-context">{content.dialog.mobileIntroTitle}</p>{macReleases.map((release) => <a href={release.url}>{content.dialog.mac}: {release.architecture === "apple-silicon" ? "Apple Silicon" : "Intel"}</a>)}{windowsReleases.map((release) => <a href={release.url}>{content.dialog.windows}: {release.architecture}</a>)}{!macAvailable && <p>{content.dialog.mac}: {content.dialog.unavailable} <a href={site.releases}>{content.dialog.releaseLink}</a></p>}{!windowsAvailable && <p>{content.dialog.windows}: {content.dialog.unavailable} <a href={site.releases}>{content.dialog.releaseLink}</a></p>}</section></noscript>
+
+<script src="../scripts/landing.ts"></script>

@@ -1,0 +1,99 @@
+@import "../design-system/tokens.css";
+
+/*! Production stylesheet revision: 2026-09-20. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  background: var(--landing-canvas);
+  color: var(--landing-text-strong);
+  font-family: var(--vc-font-text);
+}
+
+body { min-width: 320px; margin: 0; background: var(--landing-canvas); }
+img, svg { display: block; }
+a { color: inherit; }
+button, summary { font: inherit; }
+button, summary, a { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--vc-focus-ring); outline-offset: 3px; }
+
+.landing__container { width: min(var(--landing-content-width), calc(100% - (var(--landing-page-gutter) * 2))); margin-inline: auto; }
+.landing-shell { min-width: 0; }
+
+/* Hero: locked to Figma 419:4147 at 1440px. */
+.hero-section { height: 900px; }
+.site-header { display: flex; align-items: center; justify-content: space-between; height: 44px; padding-top: 33px; box-sizing: content-box; }
+.brand, .site-header__actions, .hero-copy__actions, .landing-button, .small-control, .disk-stats__identity, .disk-stats__scan, .disk-stats__legend li, .giant-download, .social-link, .dialog-option { display: flex; align-items: center; }
+.brand { gap: var(--vc-gap-4); text-decoration: none; }
+.brand__drive, .brand__drive img { display: block; width: 44px; height: 44px; }
+.brand__wordmark { width: 116px; height: 23px; }
+.site-header__actions { gap: var(--vc-gap-8); }
+.small-control { height: 44px; gap: var(--vc-gap-8); justify-content: center; padding: 0 var(--vc-gap-16); color: var(--vc-text-primary); font-size: 16px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; text-decoration: none; border: 0; background: var(--vc-surface-foreground); border-radius: var(--vc-radius-16); cursor: pointer; }
+.small-control:first-child { width: 56px; padding: 0; }
+.small-control--download { min-width: 116px; }.small-control--download picture, .small-control--download picture img { display: block; width: 16px; height: 16px; }
+.small-control:hover { background: var(--vc-surface-active); }
+.small-control--download { background: var(--vc-surface-active); }
+.small-control--download:hover { color: var(--vc-text-secondary); background: var(--vc-surface-foreground); }
+
+.hero-copy { width: 932px; margin: 83px auto 0; text-align: center; }
+.hero-copy h1, .features-section h2, .cta-section h2, .feature-card h3, .download-dialog h2 { margin: 0; letter-spacing: -0.02em; }
+.hero-copy h1 { display: grid; justify-items: center; font-size: 80px; font-weight: 600; line-height: 94px; }
+.hero-copy h1 > span { display: block; height: 94px; white-space: nowrap; }
+.hero-copy__line { position: relative; display: block !important; width: 932px; height: 94px !important; }.hero-copy__disk { display: block; }
+.hero-copy__line > span { position: absolute; top: 0; height: 94px; line-height: 94px; }
+.hero-copy__line > span:first-child { left: 0; }.hero-copy__line > span:last-child { left: 458px; }
+.landing-shell[data-locale="en"] .hero-copy h1 { font-size: 72px; }
+.landing-shell[data-locale="en"] .hero-copy__line { display: flex !important; width: 100%; gap: 12px; align-items: center; justify-content: center; }
+.landing-shell[data-locale="en"] .hero-copy__line > span { position: static; height: 94px; line-height: 94px; }
+.landing-shell[data-locale="en"] .hero-copy__line img { position: static; width: 88px; height: 88px; }
+.hero-copy__line img { position: absolute; top: 0; left: 354px; width: 100px; height: 100px; }
+.hero-copy p { margin: 30px 0 0; color: var(--vc-text-secondary); font-size: 24px; font-weight: 500; letter-spacing: -0.02em; line-height: 28px; white-space: pre-line; }
+.hero-copy__actions { width: 446px; gap: 16px; margin: 48px auto 0; }
+.landing-button { width: 215px; height: 48px; gap: var(--vc-gap-8); justify-content: center; color: var(--vc-text-primary); font-size: 16px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; text-decoration: none; border: 0; border-radius: var(--vc-radius-16); cursor: pointer; }
+.landing-button img { width: 16px; height: 16px; }
+.download-icon { position: relative; display: block; width: 16px; height: 16px; }.download-icon img { position: absolute; inset: 0; }.download-icon__light { opacity: 0; }
+.landing-button--aqua { color: var(--vc-text-inverse); background: var(--vc-action-primary); }
+.landing-button--aqua:hover, .giant-download:hover { color: var(--vc-text-primary); background: var(--vc-color-dark-aqua); }
+.landing-button--gray { background: var(--vc-surface-active); }.landing-button--gray:hover { color: var(--vc-text-secondary); background: var(--vc-surface-foreground); }.landing-button--aqua:hover .download-icon__dark { opacity: 0; }.landing-button--aqua:hover .download-icon__light { opacity: 1; }
+
+.disk-stats { display: grid; grid-template-rows: 48px 16px 17px; gap: 16px; height: 209px; margin-top: 97px; padding: 48px; overflow: hidden; background: var(--vc-surface-background); border-radius: var(--vc-radius-48); }
+.disk-stats__header { display: flex; align-items: center; justify-content: space-between; min-width: 0; }
+.disk-stats__identity { gap: 16px; min-width: 0; }
+.drive-tile { display: grid; flex: 0 0 auto; width: 48px; height: 48px; place-items: center; background: var(--vc-surface-active); border-radius: var(--vc-radius-16); }
+.drive-tile img { width: 32px; height: 32px; }
+.disk-stats__identity p, .disk-stats__scan, .disk-stats__legend { margin: 0; color: var(--vc-text-secondary); font-size: 12px; font-weight: 400; letter-spacing: -0.02em; line-height: 16.8px; }
+.disk-stats__numbers { display: flex; gap: 8px; align-items: baseline; margin-top: 8px; font-size: 16px; }
+.disk-stats__numbers strong, .disk-stats__numbers em { font-family: var(--vc-font-numeric); font-size: 24px; font-style: normal; font-weight: 400; letter-spacing: -0.02em; line-height: 1; white-space: nowrap; }
+.disk-stats__numbers strong { color: var(--vc-text-primary); }.disk-stats__numbers em { color: var(--vc-text-secondary); }
+.disk-stats__scan { align-self: flex-start; gap: 4px; white-space: nowrap; }.disk-stats__scan img { width: 16px; height: 16px; }
+.disk-progress { display: flex; gap: 2px; height: 16px; padding: 2px; overflow: hidden; background: var(--vc-surface-foreground); border-radius: var(--vc-radius-16); }
+.disk-progress span { display: block; flex: 0 0 auto; height: 12px; border-radius: var(--vc-radius-16); }
+.disk-progress__base { width: 585px; background: var(--vc-surface-active); }.disk-progress__green { width: 56px; background: var(--vc-color-green); }.disk-progress__blue { width: 36px; background: var(--vc-color-blue); }.disk-progress__orange { width: 21px; background: var(--vc-color-orange); }.disk-progress__white { width: 6px; background: var(--vc-color-white); }
+.disk-stats__legend { display: flex; flex-wrap: wrap; gap: 16px; padding: 0; list-style: none; }.disk-stats__legend li { gap: 4px; white-space: nowrap; }.disk-stats__legend img { width: 16px; height: 16px; }
+
+/* Features: Figma 419:4516. */
+.features-section { height: 716px; padding-top: 64px; }
+.features-section h2 { display: grid; width: max-content; max-width: calc(100% - 32px); margin-inline: auto; color: var(--vc-text-primary); font-size: 52px; font-weight: 600; line-height: 61px; text-align: center; }
+.features-section h2 > span { white-space: nowrap; }.features-section h2 em { color: var(--vc-surface-active); font-style: italic; }
+.feature-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 48px; }
+.feature-card { position: relative; height: 418px; padding: 32px; overflow: hidden; background: var(--vc-surface-background); border-radius: var(--vc-radius-48); }
+.feature-card__copy { position: relative; z-index: 1; text-align: center; }.feature-card h3 { color: var(--vc-text-primary); font-size: 28px; font-weight: 500; line-height: 33px; }.feature-card p { width: 272px; max-width: 100%; margin: 16px auto 0; color: var(--vc-text-secondary); font-size: 16px; font-weight: 300; letter-spacing: -0.02em; line-height: 19px; }
+.feature-card__icon { position: absolute; bottom: 22px; left: 50%; width: 210px; height: 210px; transform: translateX(-50%); }
+
+/* Screenshot: Figma 419:4547. */
+.screen-section { height: 828px; padding-top: 64px; }.screen-section picture, .screen-section img { display: block; width: 100%; height: 700px; }.screen-section img { object-fit: contain; }.screen-section__mobile-copy { display: none; }
+
+/* CTA: Figma 419:4880. */
+.cta-section { display: flex; flex-direction: column; align-items: center; height: 623px; padding-top: 64px; }
+.cta-section h2 { display: grid; width: 423px; color: var(--vc-text-primary); font-size: 52px; font-weight: 600; line-height: 61px; text-align: center; }.cta-section h2 > span { display: flex; justify-content: center; align-items: center; white-space: nowrap; }.cta-copy { display: block; }.os-logo { display: inline-block; flex: 0 0 auto; margin: 0 12px; object-fit: contain; }.os-logo img { width: 100%; height: 100%; }.os-logo--apple { width: 42px; height: 42px; transform: translateY(-2.5px); }.os-logo--windows { width: 52px; height: 52px; transform: translate(3px, 3px); }
+.giant-download { width: 688px; height: 172px; gap: 24px; justify-content: center; margin-top: 48px; color: var(--vc-text-inverse); font-size: 52px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; text-decoration: none; border: 0; background: var(--vc-action-primary); border-radius: var(--vc-radius-48); cursor: pointer; }.giant-download-icon { position: relative; display: block; width: 64px; height: 64px; }.giant-download-icon picture, .giant-download-icon > img { position: absolute; inset: 0; display: block; width: 64px; height: 64px; }.giant-download-icon picture img { width: 100%; height: 100%; }.giant-download-icon__light { opacity: 0; }.giant-download:hover .giant-download-icon__dark { opacity: 0; }.giant-download:hover .giant-download-icon__light { opacity: 1; }
+.cta-section__aside { margin: 48px 0 0; color: var(--vc-surface-active); font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 33px; }
+.social-links { display: grid; grid-template-columns: repeat(4, 166px); gap: 8px; margin-top: 24px; }.social-link { height: 48px; gap: 8px; justify-content: center; color: var(--vc-text-primary); font-size: 16px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; text-decoration: none; border: 0; background: var(--vc-surface-background); border-radius: var(--vc-radius-16); }.social-link img { width: 16px; height: 16px; }.social-link:hover { background: var(--vc-surface-foreground); }.social-link.is-unavailable { cursor: not-allowed; opacity: .55; }.social-link--github { color: var(--vc-color-purple); }.social-link--donate { color: var(--vc-color-orange); }.social-link--telegram { color: var(--vc-color-aqua); }.social-link--beta-chat { color: var(--vc-color-blue); }.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.site-footer { height: 114px; padding-top: 24px; color: var(--vc-surface-active); font-size: 16px; font-weight: 400; letter-spacing: -0.02em; line-height: 19px; text-align: center; }.site-footer p { margin: 0; }.site-footer em { font-style: italic; }
+
+/* The Figma modal has its own contained surface. The unavailable Windows
+   state expands only enough for the required honest explanation. */
+.download-dialog { width: 406px; max-width: calc(100vw - 32px); padding: 0; color: var(--vc-text-primary); background: transparent; border: 0; border-radius: var(--vc-radius-24); }.download-dialog::backdrop { background: var(--landing-overlay); }.download-dialog[open] { display: block; }.download-dialog__inner { width: 100%; min-width: 0; padding: 24px; background: var(--vc-surface-background); border-radius: var(--vc-radius-24); }.download-dialog__header { display: flex; align-items: center; justify-content: space-between; height: 24px; }.download-dialog h2 { font-size: 20px; font-weight: 500; letter-spacing: -0.02em; line-height: 24px; }.dialog-close { display: grid; width: 24px; height: 24px; padding: 0; place-items: center; border: 0; background: transparent; border-radius: var(--vc-radius-8); cursor: pointer; }.dialog-close:hover { background: var(--vc-surface-active); }.dialog-close img { width: 24px; height: 24px; }.focus-sentinel { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.download-dialog__choices { display: grid; gap: 8px; margin-top: 24px; }.download-dialog__choices[hidden], .download-dialog__notice[hidden], .dialog-mobile-continue[hidden], [data-dialog-title][hidden] { display: none !important; }.dialog-mobile-continue { display: none; }.download-dialog.is-mobile-intro .dialog-mobile-continue { display: flex; }.architecture-choice { position: relative; }.architecture-choice summary { position: relative; list-style: none; }.architecture-choice summary::-webkit-details-marker { display: none; }.dialog-option { width: 100%; height: 48px; gap: 8px; justify-content: center; padding: 0 16px; color: var(--vc-text-primary); font-size: 16px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; text-align: center; text-decoration: none; border: 0; background: var(--vc-surface-active); border-radius: var(--vc-radius-16); cursor: pointer; }.dialog-option:hover, .architecture-choice[open] summary { background: var(--vc-surface-foreground); }.dialog-option:disabled { color: var(--vc-text-disabled); cursor: not-allowed; }.dialog-option img { flex: 0 0 auto; width: 16px; height: 16px; }.architecture-choice__hint { position: absolute; right: 16px; }.architecture-choice__links { display: flex; gap: 8px; padding-top: 8px; }.architecture-choice__links a { flex: 1; height: 36px; padding-top: 10px; color: var(--vc-text-primary); font-size: 12px; font-weight: 500; text-align: center; text-decoration: none; background: var(--vc-surface-foreground); border-radius: var(--vc-radius-8); }.architecture-choice__links a:hover { background: var(--vc-color-dark-aqua); }.download-dialog__notice { margin: 12px 0 0; color: var(--vc-text-secondary); font-size: 12px; line-height: 16px; }.download-dialog__notice a { color: var(--vc-color-aqua); }.download-fallback { display: grid; gap: 8px; width: min(688px, calc(100% - 32px)); padding: 24px; margin: 0 auto 64px; color: var(--vc-text-primary); background: var(--vc-surface-background); border-radius: var(--vc-radius-24); }.download-fallback h2, .download-fallback p { margin: 0; }.download-fallback a { color: var(--vc-color-aqua); }.download-fallback__mobile-context { display: none; }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; } }
