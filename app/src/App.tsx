@@ -903,6 +903,8 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
   return (
     <TooltipProvider>
       <div className="flex h-screen flex-col bg-background text-foreground">
+        {/* Keep this space clear for macOS traffic lights and window dragging. */}
+        <div data-tauri-drag-region className="h-14 shrink-0" />
         {isScanningClean ? (
           <ScanningWorkspace
             disk={disk}
@@ -957,12 +959,6 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
             preferences={preferences}
           />
         ) : <>
-        {/* Keep this space clear for macOS traffic lights and window dragging. */}
-        <div
-          data-tauri-drag-region
-          className="h-14 shrink-0"
-        />
-
         <header className="flex shrink-0 flex-col gap-3 px-5 pb-5">
           <StorageBreakdownBar disk={disk} breakdown={breakdown} scanning={scanning} />
 
