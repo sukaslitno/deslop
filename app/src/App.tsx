@@ -213,7 +213,6 @@ function ScanningWorkspace({
         />
         <DiskStats
           capacityLabel={disk ? diskLabel(disk.total, locale) : "—"}
-          computerName="[computer_name]"
           state="empty"
           usedLabel={disk ? diskLabel(used, locale) : "—"}
           usedPercentage={usedPercentage}
@@ -349,7 +348,6 @@ function CleanupResultsWorkspace({
           />
           <DiskStats
             capacityLabel={disk ? diskLabel(capacity, locale) : "—"}
-            computerName="[computer_name]"
             lastScanLabel={breakdown ? t("lastScan", { age: scanAge }) : undefined}
             segments={segments}
             state={cats.length ? "results" : "empty"}
@@ -1147,7 +1145,7 @@ function SettingsView({
   onPreferencesUpdate: (patch: AppPreferencesPatch) => Promise<void>;
 }) {
   const { t } = useLocale();
-  const [version, setVersion] = useState("0.1.0");
+  const [version, setVersion] = useState("");
 
   useEffect(() => {
     void api.appInfo().then((info) => setVersion(info.version)).catch(() => undefined);
@@ -1416,7 +1414,6 @@ function AutomationsView({
         <DiskStats
           capacityLabel={disk ? diskLabel(disk.total, locale) : "—"}
           className="max-w-none shrink-0"
-          lastScanLabel={t("automationLastScanPreview")}
           state="compact"
           usedLabel={disk ? diskLabel(used, locale) : "—"}
         />
