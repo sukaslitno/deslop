@@ -121,7 +121,7 @@ export function Treemap({ root, snapshotId, onReveal }: {
           size={human(selected.size)}
           path={selected.path}
         >
-          <Button disabled={revealing || !selected.id} aria-busy={revealing} icon="folder" onClick={() => void reveal()} variant="gray">
+          <Button disabled={revealing || !selected.can_reveal} aria-busy={revealing} icon="folder" onClick={() => void reveal()} variant="gray">
             {t("mapFolder")}
           </Button>
           <Button disabled={copying} aria-busy={copying} icon="copy" onClick={() => void copyPath()} variant="gray">

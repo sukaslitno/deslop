@@ -34,12 +34,11 @@ export function TabBar({
     const current = enabled.findIndex((item) => item.id === value);
     const next = enabled[(current + step + enabled.length) % enabled.length];
     onValueChange?.(next.id);
-    document.getElementById(`${next.id}-tab`)?.focus();
+    document.getElementById(`${next.id}-navigation`)?.focus();
   }
 
   return (
     <div
-      aria-orientation="horizontal"
       onKeyDown={(event) => {
         const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
         if (!step) return;
@@ -50,16 +49,14 @@ export function TabBar({
         "vc-corner-smooth inline-flex h-12 items-start gap-[var(--vc-gap-2)] overflow-hidden rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-2)]",
         className,
       )}
-      role="tablist"
       {...props}
     >
       {items.map((item) => (
         <Tab
           active={item.id === value}
-          aria-controls={`${item.id}-panel`}
           disabled={item.disabled}
           icon={item.icon}
-          id={`${item.id}-tab`}
+          id={`${item.id}-navigation`}
           key={item.id}
           onClick={() => onValueChange?.(item.id)}
           tabIndex={item.id === value ? 0 : -1}

@@ -36,6 +36,7 @@ export function Controls({
     >
       <TabBar items={tabs} onValueChange={onValueChange} value={value} />
       {actionLabel ? <Button
+        data-settings-trigger
         disabled={actionDisabled}
         icon={actionIcon}
         onClick={onActionClick}

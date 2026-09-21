@@ -1,10 +1,10 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 // Pending Figma export: no local equivalent for the preflight shield yet (see DESIGN_AUDIT_PLAN 5.1).
 import { SafeShield2Line } from "@mingcute/react";
 import diskIcon from "@/assets/storage-drive-3d-256.png";
-import automationEmptyIcon from "@/assets/figma/automation-empty.svg?url";
-import scanStatusCheck from "@/assets/figma/scan-status-check.svg?url";
-import warningHex from "@/assets/figma/warning-hex.svg?url";
+import automationEmptyIcon from "@/assets/figma/automation-empty.svg?no-inline";
+import scanStatusCheck from "@/assets/figma/scan-status-check.svg?no-inline";
+import warningHex from "@/assets/figma/warning-hex.svg?no-inline";
 import {
   api,
   type Category,
@@ -20,6 +20,7 @@ import {
   type AppPreferences,
   type AppPreferencesPatch,
   type ScanSnapshot,
+  type CleanResult,
 } from "@/lib/api";
 import { cn, human } from "@/lib/utils";
 import {
@@ -30,9 +31,7 @@ import {
   Controls,
   DiskStats,
   Icon,
-  Input,
   Island,
-  Radio,
   TabBar,
 } from "@/design-system";
 import {
@@ -47,27 +46,15 @@ import { mapScreenState } from "@/lib/map-screen-state";
 import { OrbitingCircles } from "@/components/orbiting-circles";
 import { ScanningGlow } from "@/components/scanning-glow";
 import { scanCtaFor } from "@/lib/clean-screen-state";
+import { appCacheName } from "@/lib/app-cache-name";
 import { initialMessage, LocaleProvider, useLocale } from "@/i18n";
 
 const TIER_ORDER: Record<Tier, number> = { GREEN: 0, YELLOW: 1, RED: 2 };
 type AppRoute = "clean" | "map" | "automations" | "assistant" | "settings";
 type WorkspaceRoute = Exclude<AppRoute, "settings">;
 
-function diskLabel(bytes: number, locale: string) {
-  const gigabytes = bytes / 1_000_000_000;
-  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(gigabytes)} GB`;
-}
-
-function appCacheName(path: string) {
-  const normalized = path.toLowerCase();
-  if (normalized.includes("figma")) return "Figma";
-  if (normalized.includes("slack") || normalized.includes("tinyspeck")) return "Slack";
-  if (normalized.includes("arc") || normalized.includes("thebrowser")) return "Arc";
-  if (normalized.includes("claude")) return "Claude";
-  if (normalized.includes("codex")) return "Codex";
-  if (normalized.includes("openai.chat") || normalized.includes("chatgpt")) return "ChatGPT";
-  if (normalized.includes("lark")) return "Lark";
-  return "Другое приложение";
+function diskLabel(bytes: number) {
+  return human(bytes);
 }
 
 function cacheLeaf(path: string) {
@@ -84,6 +71,21 @@ const STORAGE_CATEGORY_META: Record<CleanupCategoryId, { token: string }> = {
   developerCaches: { token: "bg-[var(--vc-color-green)]" },
   modelCaches: { token: "bg-[var(--vc-color-dark-aqua)]" },
 };
+
+const RULE_TITLE_KEYS = {
+  claude: "ruleClaude",
+  codex: "ruleCodex",
+  editors: "ruleEditors",
+  appcache: "ruleAppCache",
+  pkg: "rulePackageCache",
+  xcode: "ruleXcode",
+  hf: "ruleHuggingFace",
+} as const;
+
+function localizedCategoryTitle(category: Category, t: ReturnType<typeof useLocale>["t"]) {
+  const key = RULE_TITLE_KEYS[category.id as keyof typeof RULE_TITLE_KEYS];
+  return key ? t(key) : category.title;
+}
 
 function StorageBreakdownBar({
   disk,
@@ -188,7 +190,7 @@ function ScanningWorkspace({
   onViewChange: (view: WorkspaceRoute) => void;
   scanJob: ScanJobStatus | null;
 }) {
-  const { locale, t } = useLocale();
+  const { t } = useLocale();
   const used = disk ? Math.max(0, disk.total - disk.free) : 0;
   const usedPercentage = disk?.total ? (used / disk.total) * 100 : 0;
   const detail = scanJob?.total_rules
@@ -212,9 +214,9 @@ function ScanningWorkspace({
           value="clean"
         />
         <DiskStats
-          capacityLabel={disk ? diskLabel(disk.total, locale) : "—"}
+          capacityLabel={disk?.total ? diskLabel(disk.total) : "—"}
           state="empty"
-          usedLabel={disk ? diskLabel(used, locale) : "—"}
+          usedLabel={disk?.total ? diskLabel(used) : "—"}
           usedPercentage={usedPercentage}
         />
 
@@ -239,6 +241,8 @@ type CleanupResultsWorkspaceProps = {
   breakdown: CleanupBreakdownSnapshot | null;
   cats: Category[];
   cleaning: boolean;
+  cleanResult: CleanResult | null;
+  cleanRefreshFailed: boolean;
   disk: DiskInfo | null;
   error: string;
   expanded: Set<string>;
@@ -246,6 +250,7 @@ type CleanupResultsWorkspaceProps = {
   onCancelScan: () => void;
   onOpenSettings: () => void;
   onRequestClean: (ids: string[]) => void;
+  onRetryCleanRefresh: () => void;
   onScan: () => void;
   onToggleCategory: (category: Category) => void;
   onToggleEntry: (id: string) => void;
@@ -265,6 +270,8 @@ function CleanupResultsWorkspace({
   breakdown,
   cats,
   cleaning,
+  cleanResult,
+  cleanRefreshFailed,
   disk,
   error,
   expanded,
@@ -272,6 +279,7 @@ function CleanupResultsWorkspace({
   onCancelScan,
   onOpenSettings,
   onRequestClean,
+  onRetryCleanRefresh,
   onScan,
   onToggleCategory,
   onToggleEntry,
@@ -287,6 +295,13 @@ function CleanupResultsWorkspace({
   sortedCats,
 }: CleanupResultsWorkspaceProps) {
   const { locale, t } = useLocale();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!breakdown) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [breakdown]);
   const capacity = breakdown?.volumeCapacityBytes ?? disk?.total ?? 0;
   const available = breakdown?.volumeAvailableBytes ?? disk?.free ?? 0;
   const used = Math.max(0, capacity - available);
@@ -296,12 +311,14 @@ function CleanupResultsWorkspace({
   const legendDefinitions: Array<{
     categoryId: CleanupCategoryId;
     label: string;
-    tone: "green" | "blue" | "orange" | "white";
+    tone: "green" | "blue" | "orange" | "white" | "aqua" | "purple" | "darkAqua";
   }> = [
-    { categoryId: "agentCaches", label: t("agentCaches"), tone: "green" },
-    { categoryId: "packageCaches", label: t("packageCaches"), tone: "blue" },
+    { categoryId: "agentCaches", label: t("agentCaches"), tone: "aqua" },
+    { categoryId: "editorCaches", label: t("editorCaches"), tone: "purple" },
     { categoryId: "applicationCaches", label: t("applicationCaches"), tone: "orange" },
-    { categoryId: "modelCaches", label: t("modelCaches"), tone: "white" },
+    { categoryId: "packageCaches", label: t("packageCaches"), tone: "blue" },
+    { categoryId: "developerCaches", label: t("developerCaches"), tone: "green" },
+    { categoryId: "modelCaches", label: t("modelCaches"), tone: "darkAqua" },
   ];
   const segments = legendDefinitions.flatMap((definition) => {
     const bytes = breakdownById.get(definition.categoryId) ?? 0;
@@ -321,7 +338,7 @@ function CleanupResultsWorkspace({
     ? (Math.max(0, used - representedBytes) / capacity) * 100
     : 0;
   const elapsedSeconds = breakdown
-    ? Math.max(0, Math.floor(Date.now() / 1000 - breakdown.completedAt))
+    ? Math.max(0, Math.floor(now / 1000 - breakdown.completedAt))
     : 0;
   const relativeTime = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
   const scanAge = elapsedSeconds < 60
@@ -347,11 +364,11 @@ function CleanupResultsWorkspace({
             value="clean"
           />
           <DiskStats
-            capacityLabel={disk ? diskLabel(capacity, locale) : "—"}
+            capacityLabel={capacity > 0 ? diskLabel(capacity) : "—"}
             lastScanLabel={breakdown ? t("lastScan", { age: scanAge }) : undefined}
             segments={segments}
             state={cats.length ? "results" : "empty"}
-            usedLabel={disk ? diskLabel(used, locale) : "—"}
+            usedLabel={capacity > 0 ? diskLabel(used) : "—"}
             usedPercentage={neutralUsedPercentage}
           />
 
@@ -361,6 +378,18 @@ function CleanupResultsWorkspace({
             <div className="vc-corner-smooth rounded-[var(--vc-radius-16)] bg-[var(--vc-danger-foreground)] p-[var(--vc-gap-16)] text-style-body-small text-[var(--vc-text-primary)]" role="alert">
               {error}
             </div>
+          ) : null}
+
+          {breakdown?.measurementKind === "logicalFallback" ? (
+            <p className="text-style-caption text-[var(--vc-text-secondary)]">{t("candidateDataLogicalEstimate")}</p>
+          ) : null}
+
+          {cleanResult ? (
+            <CleanupResultSummary
+              cleanRefreshFailed={cleanRefreshFailed}
+              onRetryRefresh={onRetryCleanRefresh}
+              result={cleanResult}
+            />
           ) : null}
 
           {categoryGroups.map((tier) => {
@@ -415,6 +444,49 @@ function CleanupResultsWorkspace({
         </div>
       ) : null}
     </main>
+  );
+}
+
+function CleanupResultSummary({
+  result,
+  cleanRefreshFailed,
+  onRetryRefresh,
+}: {
+  result: CleanResult;
+  cleanRefreshFailed: boolean;
+  onRetryRefresh: () => void;
+}) {
+  const { t } = useLocale();
+  const skippedOrFailed = result.outcomes.filter((outcome) => outcome.status !== "deleted");
+  const hasIssues = result.skipped.length > 0 || result.errors.length > 0 || Boolean(result.record_error);
+  const title = hasIssues ? t("cleanupFinishedWithIssues") : result.deleted.length ? t("cleanupFinished") : t("nothingRemoved");
+  return (
+    <section
+      aria-live="polite"
+      className="vc-corner-smooth flex flex-col gap-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-16)]"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-[var(--vc-gap-16)]">
+        <div>
+          <h2 className="text-style-body font-medium tracking-[-0.02em]">{title}</h2>
+          <p className="mt-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">
+            {t("cleanupOutcomeSummary", {
+              deleted: result.deleted.length,
+              skipped: result.skipped.length,
+              errors: result.errors.length,
+              bytes: human(result.freed),
+            })}
+          </p>
+        </div>
+        {cleanRefreshFailed ? <Button icon="refresh" onClick={onRetryRefresh} variant="gray">{t("retryRefresh")}</Button> : null}
+      </div>
+      {skippedOrFailed.length > 0 ? (
+        <ul className="space-y-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">
+          {skippedOrFailed.map((outcome) => <li key={outcome.id}>{outcome.path}: {outcome.detail}</li>)}
+        </ul>
+      ) : null}
+      {result.record_error ? <p className="text-style-caption text-[var(--vc-warning)]">{t("historyWriteError")} {result.record_error}</p> : null}
+      {cleanRefreshFailed ? <p className="text-style-caption text-[var(--vc-text-secondary)]">{t("cleanupRefreshFailed")}</p> : null}
+    </section>
   );
 }
 
@@ -495,6 +567,7 @@ function CleanupCategoryRow({
   selected: Set<string>;
 }) {
   const { t } = useLocale();
+  const categoryTitle = localizedCategoryTitle(category, t);
   const isOpen = expanded.has(category.id);
   const checkable = category.tier !== "RED";
   const entryIds = category.entries.map((entry) => entry.id);
@@ -503,7 +576,7 @@ function CleanupCategoryRow({
   const sortedEntries = [...category.entries].sort((a, b) => b.size - a.size || a.path.localeCompare(b.path));
   const applicationGroups = category.id === "appcache"
     ? Object.entries(sortedEntries.reduce<Record<string, typeof sortedEntries>>((groups, entry) => {
-      const name = appCacheName(entry.path);
+      const name = appCacheName(entry.path, t("otherApplication"));
       (groups[name] ??= []).push(entry);
       return groups;
     }, {})).sort(([, left], [, right]) => (
@@ -516,7 +589,7 @@ function CleanupCategoryRow({
       <div className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-[var(--vc-gap-16)]">
         <div className="flex min-w-0 items-center gap-[var(--vc-gap-16)]">
           <Checkbox
-            aria-label={t("select", { path: category.title })}
+            aria-label={t("select", { path: categoryTitle })}
             checked={allSelected ? true : someSelected ? "indeterminate" : false}
             disabled={!checkable}
             onCheckedChange={() => onToggleCategory(category)}
@@ -528,7 +601,7 @@ function CleanupCategoryRow({
               onClick={() => onToggleExpand(category.id)}
               type="button"
             >
-              <span className="block truncate">{category.title}</span>
+              <span className="block truncate">{categoryTitle}</span>
             </button>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -693,6 +766,8 @@ function CleanupEntryRow({
 
 function AppShell({ preferences, onPreferencesChange }: { preferences: AppPreferences; onPreferencesChange: (preferences: AppPreferences) => void }) {
   const { t, collator } = useLocale();
+  const isMac = navigator.userAgent.includes("Macintosh");
+  const map = usePersistentMap(preferences, t);
   const [roots, setRoots] = useState<string[]>([]);
   const [disk, setDisk] = useState<DiskInfo | null>(null);
   const [breakdown, setBreakdown] = useState<CleanupBreakdownSnapshot | null>(null);
@@ -703,6 +778,8 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
   const [cleaning, setCleaning] = useState(false);
   const [snapshotId, setSnapshotId] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
+  const [cleanResult, setCleanResult] = useState<CleanResult | null>(null);
+  const [cleanRefreshFailed, setCleanRefreshFailed] = useState(false);
   const [error, setError] = useState<string>("");
   const [scanError, setScanError] = useState<string>("");
   const [scanJob, setScanJob] = useState<ScanJobStatus | null>(null);
@@ -711,6 +788,10 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
   const [settingsReturnView, setSettingsReturnView] = useState<WorkspaceRoute>("clean");
   const [initializing, setInitializing] = useState(true);
   const [preflighting, setPreflighting] = useState(false);
+  const cleanInFlight = useRef(false);
+  const scanInFlight = useRef(false);
+  const settingsReturnFocus = useRef<HTMLElement | null>(null);
+  const preflightInitiator = useRef<HTMLElement | null>(null);
 
   async function applyPreferences(patch: AppPreferencesPatch) {
     const previous = preferences;
@@ -731,7 +812,11 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
       : new Set<string>();
   }
 
-  async function runScan() {
+  async function runScan(): Promise<boolean> {
+    // Claim synchronously so double activation during `defaultRoots` cannot
+    // produce concurrent jobs.
+    if (scanInFlight.current) return false;
+    scanInFlight.current = true;
     setScanning(true);
     setError("");
     setScanError("");
@@ -748,7 +833,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
         setScanJob(job);
       }
       setScanJob(job);
-      if (job.phase === "cancelled") return;
+      if (job.phase === "cancelled") return false;
       if (job.phase !== "completed" || !job.snapshot) throw new Error(job.error ?? job.message);
       const snapshot = job.snapshot;
       setSnapshotId(snapshot.id);
@@ -757,12 +842,15 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
       // Default selection is per-entry, never a whole category.
       setSelected(initialSelection(snapshot));
       setScannedOnce(true);
+      return true;
     } catch (e) {
       const message = String(e);
       setError(message);
       setScanError(message);
       toast(message, "danger");
+      return false;
     } finally {
+      scanInFlight.current = false;
       setScanning(false);
       setScanJob(null);
     }
@@ -798,9 +886,9 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
         (a, b) =>
           TIER_ORDER[a.tier] - TIER_ORDER[b.tier] ||
           b.total - a.total ||
-          collator.compare(a.title, b.title),
+          collator.compare(localizedCategoryTitle(a, t), localizedCategoryTitle(b, t)),
       ),
-    [cats],
+    [cats, collator, t],
   );
 
   function toggleEntry(id: string) {
@@ -829,6 +917,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
 
   async function requestClean(ids: string[]) {
     if (!snapshotId || !ids.length) return;
+    preflightInitiator.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setPreflighting(true);
     setError("");
     try {
@@ -840,27 +929,37 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
     }
   }
   async function confirmClean() {
-    if (!preflight) return;
+    if (!preflight || cleanInFlight.current) return;
+    cleanInFlight.current = true;
     setCleaning(true);
     setError("");
+    let shouldRefresh = false;
     try {
       const r = await api.clean(preflight.id, preflight.requires_yellow_confirmation);
-      toast(
-        r.deleted.length ? t("freed", { bytes: human(r.freed) }) : t("nothingRemoved"),
-        r.errors.length || !r.deleted.length ? "danger" : "success",
-      );
       setPreflight(null);
-      const [d, snapshot] = await Promise.all([api.diskInfo(), api.scan(roots)]);
-      setDisk(d);
-      setSnapshotId(snapshot.id);
-      setCats(snapshot.categories);
-      setBreakdown(snapshot.breakdown);
-      setSelected(initialSelection(snapshot));
+      setCleanResult(r);
+      setCleanRefreshFailed(false);
+      const hasIssues = r.skipped.length > 0 || r.errors.length > 0 || Boolean(r.record_error);
+      toast(
+        r.deleted.length ? (r.freed_size_unknown ? t("cleanupCompletedSizeUnknown") : t("freed", { bytes: human(r.freed) })) : t("nothingRemoved"),
+        hasIssues || !r.deleted.length ? "danger" : "success",
+      );
+      shouldRefresh = true;
     } catch (e) {
+      // A preflight is single-use once confirmation starts. Never leave a
+      // stale dialog that can accidentally repeat a destructive operation.
+      setPreflight(null);
       setError(String(e));
       toast(String(e), "danger");
     } finally {
+      cleanInFlight.current = false;
       setCleaning(false);
+    }
+    // Refresh is a distinct, cancellable operation. It must never keep the
+    // destructive-operation lock or re-run cleanup on retry.
+    if (shouldRefresh) {
+      const refreshed = await runScan();
+      setCleanRefreshFailed(!refreshed);
     }
   }
 
@@ -875,34 +974,55 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
 
   async function cancelScan() {
     if (!scanJob) return;
-    setScanJob(await api.cancelScan(scanJob.id));
+    try {
+      setScanJob(await api.cancelScan(scanJob.id));
+    } catch (reason) {
+      setError(String(reason));
+      toast(String(reason), "danger");
+    }
   }
 
   function openSettings() {
-    if (view !== "settings") setSettingsReturnView(view);
+    if (view !== "settings") {
+      settingsReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setSettingsReturnView(view);
+    }
     setView("settings");
+  }
+
+  function closeSettings() {
+    setView(settingsReturnView);
+    window.requestAnimationFrame(() => {
+      const previous = settingsReturnFocus.current;
+      if (previous?.isConnected) previous.focus();
+      else document.querySelector<HTMLElement>("[data-settings-trigger]")?.focus();
+    });
   }
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey && event.key === ",") {
+      if (preflight) {
+        if ((event.metaKey || event.ctrlKey) && event.key === ",") event.preventDefault();
+        return;
+      }
+      if ((isMac ? event.metaKey : event.ctrlKey) && event.key === ",") {
         event.preventDefault();
         openSettings();
       }
       if (event.key === "Escape" && view === "settings") {
         event.preventDefault();
-        setView(settingsReturnView);
+        closeSettings();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [view, settingsReturnView]);
+  }, [isMac, preflight, view, settingsReturnView]);
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen flex-col bg-background text-foreground">
-        {/* Keep this space clear for macOS traffic lights and window dragging. */}
-        <div data-tauri-drag-region className="h-14 shrink-0" />
+      <div ref={(element) => { if (element) element.inert = Boolean(preflight); }} aria-hidden={preflight ? true : undefined} className={cn("flex h-screen flex-col bg-background text-foreground", preflight && "pointer-events-none")}>
+        {/* Windows has its native title bar; only macOS needs this drag/traffic-light region. */}
+        {isMac ? <div data-tauri-drag-region className="h-14 shrink-0" /> : null}
         {isScanningClean ? (
           <ScanningWorkspace
             disk={disk}
@@ -916,6 +1036,8 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
             breakdown={breakdown}
             cats={cats}
             cleaning={cleaning}
+            cleanResult={cleanResult}
+            cleanRefreshFailed={cleanRefreshFailed}
             disk={disk}
             error={error}
             expanded={expanded}
@@ -923,6 +1045,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
             onCancelScan={cancelScan}
             onOpenSettings={openSettings}
             onRequestClean={requestClean}
+            onRetryCleanRefresh={() => void runScan().then((refreshed) => setCleanRefreshFailed(!refreshed))}
             onScan={runScan}
             onToggleCategory={toggleCategory}
             onToggleEntry={toggleEntry}
@@ -940,9 +1063,9 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
         ) : view === "map" ? (
           <MapView
             disk={disk}
+            map={map}
             onOpenSettings={openSettings}
             onViewChange={(nextView) => setView(nextView)}
-            preferences={preferences}
           />
         ) : view === "automations" ? (
           <AutomationsView
@@ -952,7 +1075,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
           />
         ) : view === "settings" ? (
           <SettingsView
-            onBack={() => setView(settingsReturnView)}
+            onBack={closeSettings}
             onPreferencesUpdate={applyPreferences}
             preferences={preferences}
           />
@@ -986,6 +1109,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
         <PreflightDialog
           preflight={preflight}
           cleaning={cleaning}
+          returnFocus={preflightInitiator.current}
           onCancel={() => setPreflight(null)}
           onConfirm={confirmClean}
         />
@@ -996,57 +1120,17 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
 
 function MapView({
   disk,
+  map,
   onOpenSettings,
   onViewChange,
-  preferences,
 }: {
   disk: DiskInfo | null;
+  map: PersistentMapController;
   onOpenSettings: () => void;
   onViewChange: (view: WorkspaceRoute) => void;
-  preferences: AppPreferences;
 }) {
   const { t, locale } = useLocale();
-  const [snapshot, setSnapshot] = useState<MapSnapshot | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>("");
-  const [treeJob, setTreeJob] = useState<TreeJobStatus | null>(null);
-
-  async function scanHome() {
-    setError("");
-    try {
-      const home = preferences.rememberLastMapFolder && preferences.lastMapFolder
-        ? preferences.lastMapFolder
-        : await api.homeDir();
-      const next = await runTreeScan(home, 6, 20 * 1024 * 1024);
-      if (next) setSnapshot(next);
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function runTreeScan(root: string, maxDepth: number, minSize: number) {
-    setLoading(true);
-    setError("");
-    try {
-      const started = await api.startTreeScan(root, maxDepth, minSize);
-      setTreeJob(started);
-      let job = started;
-      while (job.phase === "running" || job.phase === "cancelling") {
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
-        job = await api.treeJobStatus(started.id);
-        setTreeJob(job);
-      }
-      if (job.phase === "cancelled") {
-        setError(t(snapshot ? "mapRefreshCancelled" : "mapInitialScanCancelled"));
-        return null;
-      }
-      if (job.phase !== "completed" || !job.snapshot) throw new Error(job.error ?? job.message);
-      return job.snapshot;
-    } finally {
-      setLoading(false);
-      setTreeJob(null);
-    }
-  }
+  const { snapshot, loading, error, treeJob, scanHome, cancelTreeScan } = map;
 
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -1068,11 +1152,6 @@ function MapView({
   const screenState = mapScreenState({ hasSnapshot: Boolean(snapshot), scanning: loading });
   const isInitialMapScan = !snapshot && screenState.showsProgress;
 
-  function cancelTreeScan() {
-    if (!treeJob) return;
-    void api.cancelTreeScan(treeJob.id).then(setTreeJob);
-  }
-
   return (
     <main className="vc-corner-smooth relative h-full min-h-0 w-full overflow-hidden rounded-[var(--vc-radius-32)] bg-[var(--vc-surface-background)] text-[var(--vc-text-primary)]">
       {isInitialMapScan ? <ScanningGlow /> : null}
@@ -1089,15 +1168,16 @@ function MapView({
           value="map"
         />
         <DiskStats
-          capacityLabel={disk ? diskLabel(disk.total, locale) : "—"}
+          capacityLabel={disk?.total ? diskLabel(disk.total) : "—"}
           className="max-w-none shrink-0"
           lastScanLabel={snapshot ? snapshotAge() : t("mapNotScanned")}
           state="compact"
-          usedLabel={disk ? diskLabel(used, locale) : "—"}
+          usedLabel={disk?.total ? diskLabel(used) : "—"}
         />
 
         <div className="relative min-h-0 w-full flex-1">
-          {error && <div className="border-red/30 bg-red/5 text-red mb-3 rounded-xl border p-3 text-style-body-small" role="alert">{error}</div>}
+          {error && <div className="vc-corner-smooth mb-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-danger-foreground)] p-[var(--vc-gap-16)] text-style-body-small text-[var(--vc-text-primary)]" role="alert">{error}</div>}
+          {snapshot?.is_partial ? <div className="vc-corner-smooth mb-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-warning-foreground)] p-[var(--vc-gap-16)] text-style-body-small text-[var(--vc-text-primary)]" role="status">{t("mapPartial", { count: snapshot.skipped_nodes })}</div> : null}
           {isInitialMapScan && (
             <section className="flex h-full w-full flex-col items-center justify-center gap-[var(--vc-gap-24)] overflow-hidden text-center" role="status" aria-busy="true" aria-live="polite">
               <div className="vc-corner-smooth grid size-16 place-items-center overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)]">
@@ -1107,7 +1187,7 @@ function MapView({
                 <h1 className="text-style-heading font-medium tracking-[-0.02em]">{t("buildingDiskMap")}</h1>
                 <p className="text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{t("buildingDiskMapDetail")}</p>
               </div>
-              <Button disabled={!treeJob} icon="x" onClick={cancelTreeScan} variant="destructive">
+              <Button disabled={!treeJob} icon="x" onClick={() => void cancelTreeScan()} variant="destructive">
                 {t("cancelScanShort")}
               </Button>
             </section>
@@ -1124,7 +1204,7 @@ function MapView({
                   {t("diskMapEmptyBody")}
                 </p>
               </div>
-              <Button icon="layers" onClick={scanHome}>
+              <Button icon="layers" onClick={() => void scanHome()}>
                 {t("viewDiskMap")}
               </Button>
             </section>
@@ -1188,9 +1268,8 @@ function SettingsView({
               <span>{t("version")}</span>
               <span className="tabular-nums">{version}</span>
             </div>
-            <div className="grid grid-cols-4 gap-[var(--vc-gap-8)]">
-              <SettingsLink icon="github" label={t("github")} tone="purple" />
-              <SettingsLink icon="donate" label={t("donate")} tone="orange" />
+            <div className="grid grid-cols-3 gap-[var(--vc-gap-8)]">
+              <SettingsLink icon="github" label={t("github")} onClick={() => openSettingsLink("github_repository")} tone="purple" />
               <SettingsLink icon="telegram" label={t("telegramChannel")} onClick={() => openSettingsLink("telegram_channel")} tone="aqua" />
               <SettingsLink icon="chat" label={t("betaTestersChat")} onClick={() => openSettingsLink("beta_testers_chat")} tone="blue" />
             </div>
@@ -1207,14 +1286,13 @@ function SettingsLink({
   onClick,
   tone,
 }: {
-  icon: "github" | "donate" | "telegram" | "chat";
+  icon: "github" | "telegram" | "chat";
   label: string;
   onClick?: () => void;
-  tone: "purple" | "orange" | "aqua" | "blue";
+  tone: "purple" | "aqua" | "blue";
 }) {
   const toneClass = {
     purple: "text-[var(--vc-color-purple)]",
-    orange: "text-[var(--vc-color-orange)]",
     aqua: "text-[var(--vc-color-aqua)]",
     blue: "text-[var(--vc-color-blue)]",
   }[tone];
@@ -1233,70 +1311,6 @@ function InformationCallout({ title, detail }: { title: string; detail: string }
   return <section className="mt-4 flex gap-3 rounded-xl bg-muted/60 px-3 py-3"><SafeShield2Line className="mt-0.5 size-4 shrink-0 text-foreground" aria-hidden="true" /><div className="min-w-0"><h2 className="text-style-body-small font-medium">{title}</h2><p className="text-muted-foreground mt-1 text-style-body-small leading-5 text-pretty">{detail}</p></div></section>;
 }
 
-const AUTOMATION_TARGETS = [
-  { id: "applications", labelKey: "automationApplicationCaches" },
-  { id: "packages", labelKey: "automationPackageCaches" },
-  { id: "editors", labelKey: "automationEditorCaches" },
-  { id: "claude", labelKey: "automationClaudeCaches" },
-] as const;
-
-const AUTOMATION_DAYS = [
-  { id: "mon", labelKey: "automationMonday" },
-  { id: "tue", labelKey: "automationTuesday" },
-  { id: "wed", labelKey: "automationWednesday" },
-  { id: "thu", labelKey: "automationThursday" },
-  { id: "fri", labelKey: "automationFriday" },
-  { id: "sat", labelKey: "automationSaturday" },
-  { id: "sun", labelKey: "automationSunday" },
-] as const;
-
-type AutomationTargetId = (typeof AUTOMATION_TARGETS)[number]["id"];
-type AutomationDayId = (typeof AUTOMATION_DAYS)[number]["id"];
-type AutomationFrequency = "daily" | "weekly";
-type AutomationNameKey = "automationAppsEndOfDay" | "automationAgents";
-
-type AutomationDraft = {
-  targetIds: AutomationTargetId[];
-  frequency: AutomationFrequency;
-  dayIds: AutomationDayId[];
-  hour: string;
-  minute: string;
-};
-
-type AutomationJob = AutomationDraft & {
-  id: string;
-  name?: string;
-  nameKey?: AutomationNameKey;
-};
-
-function newAutomationDraft(): AutomationDraft {
-  return {
-    targetIds: ["applications", "editors"],
-    frequency: "daily",
-    dayIds: ["mon", "wed", "fri"],
-    hour: "18",
-    minute: "00",
-  };
-}
-
-function boundedTimePart(value: string, ceiling: number) {
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) return "00";
-  return String(Math.min(Math.max(parsed, 0), ceiling)).padStart(2, "0");
-}
-
-function automationTime({ hour, minute }: Pick<AutomationDraft, "hour" | "minute">) {
-  return `${boundedTimePart(hour, 23)}:${boundedTimePart(minute, 59)}`;
-}
-
-function AutomationSectionIcon() {
-  return (
-    <div className="vc-corner-smooth grid size-12 shrink-0 place-items-center overflow-hidden rounded-[var(--vc-radius-16)] bg-[var(--vc-color-dark-aqua)]">
-      <Icon aria-hidden className="size-8 text-[var(--vc-color-aqua)]" name="automation" />
-    </div>
-  );
-}
-
 function AutomationsView({
   disk,
   onOpenSettings,
@@ -1306,96 +1320,8 @@ function AutomationsView({
   onOpenSettings: () => void;
   onViewChange: (view: WorkspaceRoute) => void;
 }) {
-  const { t, locale } = useLocale();
+  const { t } = useLocale();
   const used = disk ? Math.max(0, disk.total - disk.free) : 0;
-  const [screen, setScreen] = useState<"list" | "editor">("list");
-  // The first visit is deliberately empty. Saved jobs enter the list only
-  // through this session's form until scheduler persistence is wired up.
-  const [automations, setAutomations] = useState<AutomationJob[]>([]);
-  const [draft, setDraft] = useState<AutomationDraft>(newAutomationDraft);
-  const [editingId, setEditingId] = useState<string | null>(null);
-
-  const formattedSchedule = (automation: AutomationDraft) => {
-    const time = automationTime(automation);
-    if (automation.frequency === "daily") return t("automationDailyAt", { time });
-    const days = AUTOMATION_DAYS
-      .filter((day) => automation.dayIds.includes(day.id))
-      .map((day) => t(day.labelKey))
-      .join(", ");
-    return t("automationWeeklyAt", { days, time });
-  };
-
-  const footerSummary = () => {
-    const time = automationTime(draft);
-    if (draft.frequency === "daily") return t("automationDailySummary", { time });
-    const days = AUTOMATION_DAYS
-      .filter((day) => draft.dayIds.includes(day.id))
-      .map((day) => t(day.labelKey))
-      .join(", ");
-    return t("automationWeeklySummary", { days, time });
-  };
-
-  const automationName = (automation: AutomationJob) => automation.name ?? (automation.nameKey ? t(automation.nameKey) : t("automationTitle"));
-  const canSave = draft.targetIds.length > 0 && (draft.frequency === "daily" || draft.dayIds.length > 0);
-
-  const startCreate = () => {
-    setEditingId(null);
-    setDraft(newAutomationDraft());
-    setScreen("editor");
-  };
-
-  const startEdit = (automation: AutomationJob) => {
-    setEditingId(automation.id);
-    setDraft({
-      targetIds: [...automation.targetIds],
-      frequency: automation.frequency,
-      dayIds: [...automation.dayIds],
-      hour: automation.hour,
-      minute: automation.minute,
-    });
-    setScreen("editor");
-  };
-
-  const saveAutomation = () => {
-    if (!canSave) return;
-    const normalizedDraft: AutomationDraft = {
-      ...draft,
-      hour: boundedTimePart(draft.hour, 23),
-      minute: boundedTimePart(draft.minute, 59),
-    };
-    const name = normalizedDraft.targetIds.includes("editors") || normalizedDraft.targetIds.includes("claude")
-      ? t("automationAgents")
-      : t("automationAppsEndOfDay");
-    const automation: AutomationJob = {
-      ...normalizedDraft,
-      id: editingId ?? `automation-${Date.now()}`,
-      name,
-    };
-    setAutomations((current) => editingId
-      ? current.map((item) => item.id === editingId ? automation : item)
-      : [...current, automation]);
-    setScreen("list");
-    toast(t("automationSaved"));
-  };
-
-  const toggleTarget = (id: AutomationTargetId, checked: boolean) => {
-    setDraft((current) => ({
-      ...current,
-      targetIds: checked ? [...current.targetIds, id] : current.targetIds.filter((target) => target !== id),
-    }));
-  };
-
-  const toggleDay = (id: AutomationDayId) => {
-    setDraft((current) => ({
-      ...current,
-      dayIds: current.dayIds.includes(id) ? current.dayIds.filter((day) => day !== id) : [...current.dayIds, id],
-    }));
-  };
-
-  const updateTimePart = (part: "hour" | "minute", value: string) => {
-    if (!/^\d{0,2}$/.test(value)) return;
-    setDraft((current) => ({ ...current, [part]: value }));
-  };
 
   return (
     <main className="vc-corner-smooth relative h-full min-h-0 w-full overflow-hidden rounded-[var(--vc-radius-32)] bg-[var(--vc-surface-background)] text-[var(--vc-text-primary)]">
@@ -1412,143 +1338,23 @@ function AutomationsView({
           value="automations"
         />
         <DiskStats
-          capacityLabel={disk ? diskLabel(disk.total, locale) : "—"}
+          capacityLabel={disk?.total ? diskLabel(disk.total) : "—"}
           className="max-w-none shrink-0"
           state="compact"
-          usedLabel={disk ? diskLabel(used, locale) : "—"}
+          usedLabel={disk?.total ? diskLabel(used) : "—"}
         />
 
-        {screen === "list" && automations.length === 0 ? (
-          <section className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-[var(--vc-gap-24)] overflow-hidden text-center" aria-labelledby="automation-empty-title">
-            <div className="vc-corner-smooth grid size-16 place-items-center overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-color-dark-aqua)]">
-              <img alt="" className="block" src={automationEmptyIcon} />
-            </div>
-            <div className="flex flex-col items-center gap-[var(--vc-gap-16)] whitespace-nowrap">
-              <h1 className="text-style-heading font-medium tracking-[-0.02em]" id="automation-empty-title">{t("automationTitle")}</h1>
-              <p className="text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{t("automationEmptyBody")}</p>
-            </div>
-            <Button icon="add" onClick={startCreate}>{t("createAutomation")}</Button>
-          </section>
-        ) : screen === "list" ? (
-          <section className="vc-corner-smooth flex min-h-0 w-full flex-1 flex-col gap-[var(--vc-gap-24)] overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-24)]" aria-labelledby="automation-list-title">
-            <header className="flex h-12 shrink-0 items-center gap-[var(--vc-gap-16)]">
-              <AutomationSectionIcon />
-              <div className="min-w-0 flex-1">
-                <h1 className="text-style-heading font-normal tracking-[-0.02em]" id="automation-list-title">{t("automationMyTitle")}</h1>
-                <p className="mt-[var(--vc-gap-8)] text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">
-                  {automations[0] ? formattedSchedule(automations[0]) : t("automationEmptyBody")}
-                </p>
-              </div>
-              <ButtonIcon icon="add" label={t("createAutomation")} onClick={startCreate} />
-            </header>
-
-            <div className="min-h-0 space-y-[var(--vc-gap-8)] overflow-y-auto pr-[var(--vc-gap-2)]" role="list">
-              {automations.map((automation) => (
-                <article className="vc-corner-smooth flex min-h-16 items-center gap-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-16)]" key={automation.id} role="listitem">
-                  <div className="min-w-0 flex-1">
-                    <h2 className="truncate text-style-body font-medium tracking-[-0.02em]">{automationName(automation)}</h2>
-                    <p className="mt-[var(--vc-gap-4)] truncate text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{formattedSchedule(automation)}</p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-[var(--vc-gap-4)]">
-                    <ButtonIcon icon="edit" label={t("automationEdit")} onClick={() => startEdit(automation)} size="small" />
-                    <ButtonIcon className="bg-[var(--vc-danger-foreground)] text-[var(--vc-danger)] hover:bg-[var(--vc-danger)] hover:text-[var(--vc-text-inverse)]" icon="delete" label={t("automationDelete")} onClick={() => setAutomations((current) => current.filter((item) => item.id !== automation.id))} size="small" />
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-        ) : (
-          <section className="relative flex min-h-0 w-full flex-1 flex-col" aria-labelledby="automation-editor-title">
-            <div className="min-h-0 flex-1 overflow-y-auto pb-[calc(var(--vc-gap-64)+var(--vc-gap-24))] pr-[var(--vc-gap-2)]">
-              <div className="vc-corner-smooth flex flex-col gap-[var(--vc-gap-24)] rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-24)]">
-                <header className="flex h-12 items-center gap-[var(--vc-gap-16)]">
-                  <AutomationSectionIcon />
-                  <div className="min-w-0">
-                    <h1 className="text-style-heading font-normal tracking-[-0.02em]" id="automation-editor-title">{t("automationSetTitle")}</h1>
-                    <p className="mt-[var(--vc-gap-8)] text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{t("automationSetBody")}</p>
-                  </div>
-                </header>
-
-                <div className="flex flex-col gap-[var(--vc-gap-8)]">
-                  <section className="vc-corner-smooth flex flex-col gap-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-16)]" aria-labelledby="automation-clean-title">
-                    <h2 className="text-style-body font-medium tracking-[-0.02em]" id="automation-clean-title">{t("automationWhatClean")}</h2>
-                    {AUTOMATION_TARGETS.map((target) => {
-                      const checked = draft.targetIds.includes(target.id);
-                      return (
-                        <div className="flex min-h-4 items-center gap-[var(--vc-gap-16)]" key={target.id}>
-                          <Checkbox aria-label={t(target.labelKey)} checked={checked} onCheckedChange={(next) => toggleTarget(target.id, next === true)} />
-                          <button className="flex min-w-0 items-center gap-[var(--vc-gap-8)] text-left text-style-body font-medium tracking-[-0.02em] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" onClick={() => toggleTarget(target.id, !checked)} type="button">
-                            <span>{t(target.labelKey)}</span>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span className="inline-flex size-4 shrink-0 cursor-help text-[var(--vc-text-secondary)]" tabIndex={0}><Icon aria-hidden className="size-4" name="info" /></span>
-                              </TooltipTrigger>
-                              <TooltipContent>{t("automationScopeHelp")}</TooltipContent>
-                            </Tooltip>
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </section>
-
-                  <section className="vc-corner-smooth flex flex-col gap-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-16)]" aria-labelledby="automation-when-title">
-                    <h2 className="text-style-body font-medium tracking-[-0.02em]" id="automation-when-title">{t("automationWhenClean")}</h2>
-                    <div aria-labelledby="automation-when-title" className="flex flex-col gap-[var(--vc-gap-16)]" role="radiogroup">
-                      <div className="flex items-center gap-[var(--vc-gap-16)]">
-                        <Radio aria-label={t("automationEveryDay")} checked={draft.frequency === "daily"} onCheckedChange={() => setDraft((current) => ({ ...current, frequency: "daily" }))} />
-                        <button className="text-left text-style-body font-medium tracking-[-0.02em] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" onClick={() => setDraft((current) => ({ ...current, frequency: "daily" }))} type="button">{t("automationEveryDay")}</button>
-                      </div>
-                      {draft.frequency === "daily" ? <AutomationTimeFields draft={draft} onChange={updateTimePart} t={t} /> : null}
-
-                      <div className="flex items-center gap-[var(--vc-gap-16)]">
-                        <Radio aria-label={t("automationEveryWeek")} checked={draft.frequency === "weekly"} onCheckedChange={() => setDraft((current) => ({ ...current, frequency: "weekly" }))} />
-                        <button className="text-left text-style-body font-medium tracking-[-0.02em] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" onClick={() => setDraft((current) => ({ ...current, frequency: "weekly" }))} type="button">{t("automationEveryWeek")}</button>
-                      </div>
-                      {draft.frequency === "weekly" ? (
-                        <div className="flex flex-col gap-[var(--vc-gap-16)]">
-                          <div className="flex flex-wrap gap-[var(--vc-gap-4)]" aria-label={t("automationEveryWeek")}>
-                            {AUTOMATION_DAYS.map((day) => <ButtonSmall active={draft.dayIds.includes(day.id)} key={day.id} onClick={() => toggleDay(day.id)}>{t(day.labelKey)}</ButtonSmall>)}
-                          </div>
-                          <AutomationTimeFields draft={draft} onChange={updateTimePart} t={t} />
-                        </div>
-                      ) : null}
-                    </div>
-                  </section>
-                </div>
-              </div>
-            </div>
-
-            <footer className="pointer-events-none absolute inset-x-0 bottom-[var(--vc-gap-24)] z-10 flex justify-center">
-              <Island className="pointer-events-auto max-w-full">
-                <p className="min-w-0 px-[var(--vc-gap-16)] text-right text-style-body tracking-[-0.02em] text-[var(--vc-text-secondary)]">
-                  {canSave ? <><span> {footerSummary().split(" ")[0]}</span> <span className="text-[var(--vc-color-aqua)]">{footerSummary().slice(footerSummary().indexOf(" ") + 1)}</span></> : t("automationNoSelection")}
-                </p>
-                <Button icon="check" disabled={!canSave} onClick={saveAutomation} variant="success">{t("automationSave")}</Button>
-                <Button icon="x" onClick={() => setScreen("list")} variant="gray">{t("automationCancel")}</Button>
-              </Island>
-            </footer>
-          </section>
-        )}
+        <section className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-[var(--vc-gap-24)] overflow-hidden text-center" aria-labelledby="automation-empty-title">
+          <div className="vc-corner-smooth grid size-16 place-items-center overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-color-dark-aqua)]">
+            <img alt="" className="block" src={automationEmptyIcon} />
+          </div>
+          <div className="flex max-w-[416px] flex-col items-center gap-[var(--vc-gap-16)]">
+            <h1 className="text-style-heading font-medium tracking-[-0.02em]" id="automation-empty-title">{t("automationTitle")}</h1>
+            <p className="text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{t("automationUnavailable")}</p>
+          </div>
+        </section>
       </div>
     </main>
-  );
-}
-
-function AutomationTimeFields({
-  draft,
-  onChange,
-  t,
-}: {
-  draft: AutomationDraft;
-  onChange: (part: "hour" | "minute", value: string) => void;
-  t: ReturnType<typeof useLocale>["t"];
-}) {
-  return (
-    <div className="flex items-center gap-[var(--vc-gap-4)]">
-      <Input aria-label={`${t("automationWhenClean")} hour`} inputMode="numeric" maxLength={2} onChange={(event) => onChange("hour", event.target.value)} value={draft.hour} className="w-20" />
-      <span className="text-style-body font-medium tracking-[-0.02em]" aria-hidden>:</span>
-      <Input aria-label={`${t("automationWhenClean")} minute`} inputMode="numeric" maxLength={2} onChange={(event) => onChange("minute", event.target.value)} value={draft.minute} className="w-20" />
-    </div>
   );
 }
 
@@ -1638,22 +1444,169 @@ function LoadingState({ message, compact = false }: { message: string; compact?:
   );
 }
 
+type PersistentMapState = {
+  snapshot: MapSnapshot | null;
+  loading: boolean;
+  error: string;
+  treeJob: TreeJobStatus | null;
+};
+
+type PersistentMapController = PersistentMapState & {
+  scanHome: () => Promise<void>;
+  cancelTreeScan: () => Promise<void>;
+};
+
+/**
+ * Map work belongs to AppShell rather than its route component: changing tabs
+ * must neither discard an active backend job nor erase a completed snapshot.
+ */
+function usePersistentMap(preferences: AppPreferences, t: ReturnType<typeof useLocale>["t"]): PersistentMapController {
+  const [snapshot, setSnapshot] = useState<MapSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [treeJob, setTreeJob] = useState<TreeJobStatus | null>(null);
+  const inFlight = useRef(false);
+  const activeJobId = useRef<string | null>(null);
+  const runToken = useRef(0);
+  const cancellationRequested = useRef(new Set<string>());
+
+  const scanHome = useCallback(async () => {
+    // Claim the operation before the first await (including `homeDir`).
+    if (inFlight.current) return;
+    inFlight.current = true;
+    const token = ++runToken.current;
+    setError("");
+    setLoading(true);
+    try {
+      const home = preferences.rememberLastMapFolder && preferences.lastMapFolder
+        ? preferences.lastMapFolder
+        : await api.homeDir();
+      if (token !== runToken.current) return;
+      const started = await api.startTreeScan(home, 6, 20 * 1024 * 1024);
+      if (token !== runToken.current) return;
+      activeJobId.current = started.id;
+      setTreeJob(started);
+      let job = started;
+      while (job.phase === "running" || job.phase === "cancelling") {
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        job = await api.treeJobStatus(started.id);
+        if (token !== runToken.current) return;
+        setTreeJob(job);
+      }
+      if (token !== runToken.current) return;
+      if (job.phase === "cancelled" || cancellationRequested.current.has(started.id)) {
+        setError(t(snapshot ? "mapRefreshCancelled" : "mapInitialScanCancelled"));
+        return;
+      }
+      if (job.phase !== "completed" || !job.snapshot) throw new Error(job.error ?? job.message);
+      setSnapshot(job.snapshot);
+    } catch (reason) {
+      if (token === runToken.current) setError(String(reason));
+    } finally {
+      if (token === runToken.current) {
+        activeJobId.current = null;
+        inFlight.current = false;
+        setLoading(false);
+        setTreeJob(null);
+      }
+    }
+  }, [preferences.lastMapFolder, preferences.rememberLastMapFolder, snapshot, t]);
+
+  const cancelTreeScan = useCallback(async () => {
+    const id = activeJobId.current;
+    if (!id) return;
+    try {
+      const status = await api.cancelTreeScan(id);
+      if (status.phase === "cancelling" || status.phase === "cancelled") {
+        cancellationRequested.current.add(id);
+      }
+      if (activeJobId.current === id) setTreeJob(status);
+    } catch (reason) {
+      setError(String(reason));
+      toast(String(reason), "danger");
+    }
+  }, []);
+
+  return { snapshot, loading, error, treeJob, scanHome, cancelTreeScan };
+}
+
 
 function PreflightDialog({
   preflight,
   cleaning,
   onCancel,
   onConfirm,
+  returnFocus,
 }: {
   preflight: Preflight;
   cleaning: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  returnFocus: HTMLElement | null;
 }) {
   const { t } = useLocale();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(returnFocus);
+  const cleaningRef = useRef(cleaning);
+  const onCancelRef = useRef(onCancel);
+
+  useEffect(() => {
+    cleaningRef.current = cleaning;
+    onCancelRef.current = onCancel;
+    if (cleaning) dialogRef.current?.focus();
+  }, [cleaning, onCancel]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const focusable = () => dialog
+      ? [...dialog.querySelectorAll<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")]
+        .filter((element) => !element.hasAttribute("hidden"))
+      : [];
+    const initial = focusable()[0] ?? dialog;
+    initial?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (!cleaningRef.current) onCancelRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) {
+        event.preventDefault();
+        dialog?.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!dialog?.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (dialog && !dialog.contains(event.target as Node)) (focusable()[0] ?? dialog).focus();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
+      window.requestAnimationFrame(() => {
+        if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus();
+      });
+    };
+  }, []);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--vc-overlay)] p-[var(--vc-gap-24)]" role="dialog" aria-modal="true" aria-labelledby="preflight-title">
-      <div className="vc-corner-smooth max-h-[calc(100vh-2.5rem)] w-full max-w-xl overflow-y-auto rounded-[var(--vc-radius-24)] border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-24)]">
+      <div ref={dialogRef} tabIndex={-1} className="vc-corner-smooth max-h-[calc(100vh-2.5rem)] w-full max-w-xl overflow-y-auto rounded-[var(--vc-radius-24)] border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-24)]">
         <div className="flex items-start gap-3">
           <SafeShield2Line className={cn("mt-0.5 size-5", preflight.requires_yellow_confirmation ? "text-yellow" : "text-green")} />
           <div>

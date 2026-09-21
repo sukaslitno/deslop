@@ -1,11 +1,11 @@
 import type { HTMLAttributes, ReactNode } from "react";
 
-import driveIcon from "@/design-system/assets/disk-stats-drive.svg?url";
+import driveIcon from "@/design-system/assets/disk-stats-drive.svg?no-inline";
 import { Icon } from "@/design-system/icons";
 import { cn } from "@/lib/utils";
 
 export type DiskStatsState = "empty" | "results" | "compact";
-export type DiskStatsSegmentTone = "green" | "blue" | "orange" | "white";
+export type DiskStatsSegmentTone = "green" | "blue" | "orange" | "white" | "aqua" | "purple" | "darkAqua";
 
 export type DiskStatsSegment = {
   id: string;
@@ -20,6 +20,9 @@ const segmentToneClasses: Record<DiskStatsSegmentTone, string> = {
   blue: "bg-[var(--vc-color-blue)]",
   orange: "bg-[var(--vc-warning)]",
   white: "bg-[var(--vc-color-white)]",
+  aqua: "bg-[var(--vc-color-aqua)]",
+  purple: "bg-[var(--vc-color-purple)]",
+  darkAqua: "bg-[var(--vc-color-dark-aqua)]",
 };
 
 export type DiskStatsProps = Omit<HTMLAttributes<HTMLElement>, "children"> & {
@@ -61,7 +64,7 @@ export function DiskStats({
       className={cn(
         "vc-corner-smooth flex w-full max-w-[974px] flex-col items-start gap-[var(--vc-gap-16)] overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)]",
         state === "empty" && "h-32 p-[var(--vc-gap-24)]",
-        state === "results" && "h-40 p-[var(--vc-gap-24)]",
+        state === "results" && "min-h-40 shrink-0 p-[var(--vc-gap-24)]",
         state === "compact" && "p-[var(--vc-gap-16)]",
         className,
       )}

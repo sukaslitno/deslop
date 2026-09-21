@@ -36,6 +36,11 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "10.15"
     }

@@ -44,6 +44,8 @@ Thumbs.db
 *.swp
 *.swo
 coverage/
+app/test-results/
+app/playwright-report/
 .cache/
 *.log
 
