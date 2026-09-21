@@ -116,14 +116,6 @@
 
 @font-face {
   font-family: "Roobert Pro";
-  src: url("../../../assets/font/roobert pro/RoobertPRO-Light.otf") format("opentype");
-  font-style: normal;
-  font-weight: 300;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Roobert Pro";
   src: url("../../../assets/font/roobert pro/RoobertPRO-Regular.otf") format("opentype");
   font-style: normal;
   font-weight: 400;
@@ -135,30 +127,6 @@
   src: url("../../../assets/font/roobert pro/RoobertPRO-Medium.otf") format("opentype");
   font-style: normal;
   font-weight: 500;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Roobert Pro";
-  src: url("../../../assets/font/roobert pro/RoobertPRO-SemiBold.otf") format("opentype");
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Roobert Pro";
-  src: url("../../../assets/font/roobert pro/RoobertPRO-Bold.otf") format("opentype");
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Roobert Pro";
-  src: url("../../../assets/font/roobert pro/RoobertPRO-Heavy.otf") format("opentype");
-  font-style: normal;
-  font-weight: 800;
   font-display: swap;
 }
 

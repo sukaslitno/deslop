@@ -1,0 +1,106 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm --dir app install --frozen-lockfile
+      - run: pnpm --dir app typecheck
+      - run: pnpm --dir app test:state
+      - run: pnpm --dir app exec playwright install chromium
+      - run: pnpm --dir app test:ui
+      - run: pnpm --dir app build
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy --target x86_64-pc-windows-msvc
+      - uses: actions/cache@v4
+        id: rustcache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/src-tauri/target
+          key: windows-rust-1.88-${{ hashFiles('app/src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: windows-rust-1.88-${{ hashFiles('app/src-tauri/Cargo.lock') }}-
+      - name: Rust tests
+        working-directory: app/src-tauri
+        run: cargo test --lib -- --nocapture
+      - name: Build NSIS installer
+        working-directory: app
+        run: pnpm tauri build --bundles nsis --target x86_64-pc-windows-msvc
+      - name: Install, launch and uninstall in a temporary directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = @(Get-ChildItem app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe)
+          if ($installer.Count -ne 1) { throw "Expected exactly one installer" }
+          $installDir = Join-Path $env:RUNNER_TEMP "deslop-installer-smoke"
+          $install = Start-Process $installer[0].FullName -ArgumentList "/S /D=$installDir" -PassThru -Wait
+          if ($install.ExitCode -ne 0) { throw "Installer exited $($install.ExitCode)" }
+          $executable = Join-Path $installDir "deslop.exe"
+          if (!(Test-Path $executable)) { throw "Installed executable missing" }
+          $app = $null
+          try {
+            $app = Start-Process $executable -PassThru
+            $deadline = (Get-Date).AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 250
+              $app.Refresh()
+              if ($app.HasExited) { throw "Deslop exited before creating a window: $($app.ExitCode)" }
+            } while ($app.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline)
+            if ($app.MainWindowHandle -eq 0) { throw "Deslop did not create a native window" }
+            Start-Sleep -Seconds 3
+            $app.Refresh()
+            if ($app.HasExited) { throw "Deslop crashed after opening its window" }
+            Write-Output "Native Windows installer and WebView host launch smoke passed"
+          } finally {
+            if ($app -and !$app.HasExited) { Stop-Process -Id $app.Id -Force }
+          }
+          $uninstaller = Join-Path $installDir "uninstall.exe"
+          if (!(Test-Path $uninstaller)) { throw "Uninstaller missing" }
+          $uninstall = Start-Process $uninstaller -ArgumentList "/S" -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exited $($uninstall.ExitCode)" }
+          $deadline = (Get-Date).AddSeconds(20)
+          while ((Test-Path $executable) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+          if (Test-Path $executable) { throw "Uninstaller left the executable behind" }
+      - name: Checksum installer
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one Windows installer" }
+          $lines = $installers | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
+          $lines | Set-Content -Encoding ascii windows-checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deslop-windows-x64-nsis
+          path: |
+            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            windows-checksums.txt
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/cache/save@v4
+        if: always() && steps.rustcache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/src-tauri/target
+          key: windows-rust-1.88-${{ hashFiles('app/src-tauri/Cargo.lock') }}-${{ github.sha }}

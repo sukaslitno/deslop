@@ -1,6 +1,6 @@
 [package]
 name = "deslop"
-version = "0.1.1"
+version = "0.1.2"
 description = "A macOS utility for reviewing disk usage and cleaning regenerable caches"
 authors = ["sukaslitno"]
 edition = "2021"
@@ -19,6 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1"
 quick-xml = "0.39"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 # Vendored `time` with a one-line coherence fix (see vendor/time NOTE).
 # Required because the sandbox's crate graph (cookie 0.18.1 / tauri-utils +

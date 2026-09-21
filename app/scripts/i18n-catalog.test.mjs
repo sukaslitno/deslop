@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const output = process.env.DESLOP_I18N_TEST_OUTPUT;
 if (!output) throw new Error("DESLOP_I18N_TEST_OUTPUT is required");
-const { en } = await import(`${output}/en.js`);
-const { ru } = await import(`${output}/ru.js`);
+const { en } = await import(pathToFileURL(resolve(output, "en.js")).href);
+const { ru } = await import(pathToFileURL(resolve(output, "ru.js")).href);
 
 test("English and Russian catalogs have identical message keys", () => {
   assert.deepEqual(Object.keys(ru).sort(), Object.keys(en).sort());

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Deslop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "io.github.sukaslitno.deslop",
   "build": {
     "frontendDist": "../dist",
@@ -35,7 +35,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "category": "Utility"
+    "category": "Utility",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
   },
   "plugins": {}
 }

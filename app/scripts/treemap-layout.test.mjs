@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const output = process.env.DESLOP_STATE_TEST_OUTPUT;
 if (!output) throw new Error("DESLOP_STATE_TEST_OUTPUT is required");
-const { layoutTreemap, squarify } = await import(`${output}/treemap-layout.js`);
+const { layoutTreemap, squarify } = await import(pathToFileURL(resolve(output, "treemap-layout.js")).href);
 
 test("disk areas remain proportional to real sizes without overlap", () => {
   const nodes = [1, 61, 3, 21, 14].map((size) => ({ size }));

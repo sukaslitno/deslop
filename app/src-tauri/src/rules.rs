@@ -10,6 +10,16 @@ fn existing(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 pub fn paths_for(rule_id: &str, home: &Path) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        return windows_paths_for(rule_id, home);
+    }
+    #[cfg(not(windows))]
+    paths_for_macos(rule_id, home)
+}
+
+#[cfg(not(windows))]
+fn paths_for_macos(rule_id: &str, home: &Path) -> Vec<PathBuf> {
     let path = |relative: &str| home.join(relative);
     match rule_id {
         "claude" => existing(
@@ -60,6 +70,61 @@ pub fn paths_for(rule_id: &str, home: &Path) -> Vec<PathBuf> {
         ),
         _ => Vec::new(),
     }
+}
+
+#[cfg(windows)]
+fn windows_paths_for(rule_id: &str, home: &Path) -> Vec<PathBuf> {
+    #[cfg(test)]
+    {
+        return windows_paths_for_locations(
+            rule_id,
+            home,
+            &home.join("AppData/Local"),
+            &home.join("AppData/Roaming"),
+        );
+    }
+    #[cfg(not(test))]
+    {
+        let local = match std::env::var_os("LOCALAPPDATA") {
+            Some(path) => PathBuf::from(path),
+            None => return Vec::new(),
+        };
+        let roaming = match std::env::var_os("APPDATA") {
+            Some(path) => PathBuf::from(path),
+            None => return Vec::new(),
+        };
+        windows_paths_for_locations(rule_id, home, &local, &roaming)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_paths_for_locations(
+    rule_id: &str,
+    _home: &Path,
+    local: &Path,
+    roaming: &Path,
+) -> Vec<PathBuf> {
+    // Each path is an owned cache leaf. We deliberately never search for a
+    // generic directory named Cache or scan Windows temp/project folders.
+    let paths = match rule_id {
+        // No desktop Claude/Codex cache is claimed without an owned-path
+        // contract; their macOS-specific rules remain untouched above.
+        "claude" | "codex" => Vec::new(),
+        "editors" => vec![
+            roaming.join("Code/Cache"),
+            roaming.join("Code/CachedData"),
+            roaming.join("Cursor/Cache"),
+            roaming.join("Cursor/CachedData"),
+        ],
+        "appcache" => vec![
+            roaming.join("Slack/Cache"),
+            roaming.join("Slack/Code Cache"),
+            local.join("slack/Cache"),
+        ],
+        "pkg" => vec![local.join("npm-cache"), local.join("pnpm-store/v3/files")],
+        _ => Vec::new(),
+    };
+    existing(paths)
 }
 
 /// Returns a rule only for an exact, existing cache root owned by that rule.

@@ -20,7 +20,7 @@ export type ControlsProps = Omit<HTMLAttributes<HTMLDivElement>, "onChange"> & {
 export function Controls({
   actionDisabled = false,
   actionIcon = "settings",
-  actionLabel = "Настройки",
+  actionLabel,
   actionVisualState = "default",
   className,
   onActionClick,
@@ -35,7 +35,8 @@ export function Controls({
       {...props}
     >
       <TabBar items={tabs} onValueChange={onValueChange} value={value} />
-      <Button
+      {actionLabel ? <Button
+        data-settings-trigger
         disabled={actionDisabled}
         icon={actionIcon}
         onClick={onActionClick}
@@ -43,7 +44,7 @@ export function Controls({
         visualState={actionVisualState}
       >
         {actionLabel}
-      </Button>
+      </Button> : null}
     </div>
   );
 }

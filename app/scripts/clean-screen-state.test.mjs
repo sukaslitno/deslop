@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const output = process.env.DESLOP_STATE_TEST_OUTPUT;
 if (!output) throw new Error("DESLOP_STATE_TEST_OUTPUT is required");
-const { scanCtaFor } = await import(`${output}/clean-screen-state.js`);
+const { scanCtaFor } = await import(pathToFileURL(resolve(output, "clean-screen-state.js")).href);
 
 test("initial state exposes only the central Scan my Mac action", () => {
   assert.deepEqual(

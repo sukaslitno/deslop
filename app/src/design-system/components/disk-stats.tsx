@@ -1,11 +1,11 @@
 import type { HTMLAttributes, ReactNode } from "react";
 
-import driveIcon from "@/design-system/assets/disk-stats-drive.svg?url";
+import driveIcon from "@/design-system/assets/disk-stats-drive.svg?no-inline";
 import { Icon } from "@/design-system/icons";
 import { cn } from "@/lib/utils";
 
 export type DiskStatsState = "empty" | "results" | "compact";
-export type DiskStatsSegmentTone = "green" | "blue" | "orange" | "white";
+export type DiskStatsSegmentTone = "green" | "blue" | "orange" | "white" | "aqua" | "purple" | "darkAqua";
 
 export type DiskStatsSegment = {
   id: string;
@@ -15,18 +15,14 @@ export type DiskStatsSegment = {
   tone: DiskStatsSegmentTone;
 };
 
-const defaultSegments: readonly DiskStatsSegment[] = [
-  { id: "agents", label: "Кэши агентов: 1,9 GB", percentage: 6.1, tone: "green" },
-  { id: "packages", label: "Кэши пакетов: 1,9 GB", percentage: 3.9, tone: "blue" },
-  { id: "apps", label: "Кэши приложений · 42,3 MB", percentage: 2.3, tone: "orange" },
-  { id: "models", label: "Кэши моделей · 42,3 MB", percentage: 0.7, tone: "white" },
-];
-
 const segmentToneClasses: Record<DiskStatsSegmentTone, string> = {
   green: "bg-[var(--vc-success)]",
   blue: "bg-[var(--vc-color-blue)]",
   orange: "bg-[var(--vc-warning)]",
   white: "bg-[var(--vc-color-white)]",
+  aqua: "bg-[var(--vc-color-aqua)]",
+  purple: "bg-[var(--vc-color-purple)]",
+  darkAqua: "bg-[var(--vc-color-dark-aqua)]",
 };
 
 export type DiskStatsProps = Omit<HTMLAttributes<HTMLElement>, "children"> & {
@@ -49,18 +45,18 @@ function percentage(value: number) {
  * capacity track; `results` adds cache segments and the matching legend.
  */
 export function DiskStats({
-  capacityLabel = "245,1GB",
+  capacityLabel,
   className,
-  computerName = "[computer_name]",
-  lastScanLabel = "Последний скан: 16 минут назад",
-  segments = defaultSegments,
+  computerName,
+  lastScanLabel,
+  segments,
   state = "empty",
-  usedLabel = "60,1GB",
-  usedPercentage = 63.5,
+  usedLabel,
+  usedPercentage,
   ...props
 }: DiskStatsProps) {
-  const showTrack = state !== "compact";
-  const showResults = state === "results";
+  const showTrack = state !== "compact" && usedPercentage !== undefined;
+  const showResults = state === "results" && Boolean(segments?.length);
 
   return (
     <section
@@ -68,7 +64,7 @@ export function DiskStats({
       className={cn(
         "vc-corner-smooth flex w-full max-w-[974px] flex-col items-start gap-[var(--vc-gap-16)] overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)]",
         state === "empty" && "h-32 p-[var(--vc-gap-24)]",
-        state === "results" && "h-40 p-[var(--vc-gap-24)]",
+        state === "results" && "min-h-40 shrink-0 p-[var(--vc-gap-24)]",
         state === "compact" && "p-[var(--vc-gap-16)]",
         className,
       )}
@@ -80,15 +76,15 @@ export function DiskStats({
             <img alt="" className="size-8" src={driveIcon} />
           </div>
           <div className={cn("flex min-w-0 flex-1 gap-[var(--vc-gap-8)]", state === "compact" ? "items-center" : "flex-col items-start whitespace-nowrap")}>
-            {state !== "compact" ? <p className="text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{computerName}</p> : null}
-            <div className="flex items-center gap-[var(--vc-gap-8)] whitespace-nowrap">
+            {state !== "compact" && computerName ? <p className="text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{computerName}</p> : null}
+            {usedLabel != null && capacityLabel != null ? <div className="flex items-center gap-[var(--vc-gap-8)] whitespace-nowrap">
               <span className="text-style-numeric-large tracking-[-0.02em] text-[var(--vc-text-primary)]">{usedLabel}</span>
               <span className="text-style-body font-medium tracking-[-0.02em] text-[var(--vc-text-primary)]">/</span>
               <span className="text-style-numeric-large tracking-[-0.02em] text-[var(--vc-text-secondary)]">{capacityLabel}</span>
-            </div>
+            </div> : null}
           </div>
         </div>
-        {state !== "empty" ? (
+        {state !== "empty" && lastScanLabel ? (
           <div className="flex shrink-0 items-center gap-[var(--vc-gap-4)] text-style-caption whitespace-nowrap tracking-[-0.02em] text-[var(--vc-text-secondary)]">
             <Icon aria-hidden className="size-4" name="time" />
             <span>{lastScanLabel}</span>
@@ -106,7 +102,7 @@ export function DiskStats({
             className="vc-corner-smooth h-3 shrink-0 rounded-[var(--vc-radius-full)] bg-[var(--vc-surface-active)]"
             style={{ width: `${percentage(usedPercentage)}%` }}
           />
-          {showResults ? segments.map((segment) => (
+          {showResults ? segments?.map((segment) => (
             <span
               aria-label={`${segment.label}`}
               className={cn("vc-corner-smooth h-3 shrink-0 rounded-[var(--vc-radius-full)]", segmentToneClasses[segment.tone])}
@@ -119,7 +115,7 @@ export function DiskStats({
 
       {showResults ? (
         <ul aria-label="Cache categories" className="flex w-full flex-wrap items-start gap-x-[var(--vc-gap-16)] gap-y-[var(--vc-gap-4)]">
-          {segments.map((segment) => (
+          {segments?.map((segment) => (
             <li className="flex items-center gap-[var(--vc-gap-4)] text-style-caption whitespace-nowrap tracking-[-0.02em] text-[var(--vc-text-secondary)]" key={segment.id}>
               <span aria-hidden className={cn("vc-corner-smooth size-4 rounded-[var(--vc-radius-full)]", segmentToneClasses[segment.tone])} />
               {segment.label}

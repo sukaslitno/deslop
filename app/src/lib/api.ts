@@ -102,6 +102,7 @@ export interface CleanResult {
   run_id: string | null;
   record_error: string | null;
   freed: number;
+  freed_size_unknown: boolean;
   outcomes: CandidateOutcome[];
   deleted: string[];
   skipped: string[];
@@ -127,6 +128,7 @@ export interface MapNode {
   path: string;
   size: number;
   is_dir: boolean;
+  can_reveal: boolean;
   cleanup_rule_id: string | null;
   children: MapNode[];
 }
@@ -134,6 +136,8 @@ export interface MapNode {
 export interface MapSnapshot {
   id: string;
   created_at: number;
+  is_partial: boolean;
+  skipped_nodes: number;
   root: MapNode;
 }
 

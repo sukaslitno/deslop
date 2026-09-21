@@ -1,12 +1,14 @@
 {
   "name": "deslop",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "icons:generate": "python3 scripts/generate-icons.py",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
+    "test:ui": "playwright test",
+    "test:state": "node scripts/run-state-tests.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
@@ -28,6 +30,7 @@
   },
   "devDependencies": {
     "@iconify-json/mingcute": "^1.2.7",
+    "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "^4.0.0",
     "@tauri-apps/cli": "^2.2.0",
     "@types/react": "^18.3.18",

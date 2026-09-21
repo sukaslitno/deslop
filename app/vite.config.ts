@@ -8,6 +8,11 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
+  build: {
+    // The packaged WebView CSP intentionally does not permit `data:` images.
+    // Keep supplied SVG artwork as emitted local assets instead of Vite inlines.
+    assetsInlineLimit: 0,
+  },
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
   },

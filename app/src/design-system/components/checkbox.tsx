@@ -21,7 +21,7 @@ export function Checkbox({
 
   return (
     <button
-      aria-checked={selected}
+      aria-checked={checked === "indeterminate" ? "mixed" : checked}
       className={cn(
         "flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-[var(--vc-radius-4)] border border-[var(--vc-text-secondary)] bg-transparent text-[var(--vc-text-inverse)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)] disabled:cursor-not-allowed disabled:opacity-45",
         selected && "border-[var(--vc-action-primary)] bg-[var(--vc-action-primary)]",

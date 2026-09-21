@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import scanGlowAqua from "@/assets/figma/scan-glow-aqua.svg?url";
-import scanGlowBlue from "@/assets/figma/scan-glow-blue.svg?url";
-import scanGlowWhite from "@/assets/figma/scan-glow-white.svg?url";
+import scanGlowAqua from "@/assets/figma/scan-glow-aqua.svg?no-inline";
+import scanGlowBlue from "@/assets/figma/scan-glow-blue.svg?no-inline";
+import scanGlowWhite from "@/assets/figma/scan-glow-white.svg?no-inline";
 import "./scanning-glow.css";
 
 /** The three original Figma ellipses, moving independently along the bottom edge. */

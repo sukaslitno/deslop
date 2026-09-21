@@ -10,17 +10,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const POLICY_FINGERPRINT: &str = "2026-07-27-snapshot-v1";
-const PROTECTED_FRAGMENTS: &[&str] = &[
-    "/.claude/projects",
-    "/.claude/todos",
-    "/.claude/file-history",
-    "/.codex/sessions",
+const PROTECTED_SUFFIXES: &[&[&str]] = &[
+    &[".claude", "projects"],
+    &[".claude", "todos"],
+    &[".claude", "file-history"],
+    &[".codex", "sessions"],
 ];
 const NEVER_NAMES: &[&str] = &[
     ".git",
@@ -44,6 +44,8 @@ const NEVER_NAMES: &[&str] = &[
     "config.toml",
     "auth.json",
 ];
+const EXTERNAL_MEASUREMENT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SAFE_SIZE_ENTRIES: usize = 1_000_000;
 
 #[derive(Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
@@ -140,10 +142,10 @@ struct CleanupBreakdownSnapshot {
     categories: Vec<CleanupBreakdownCategory>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FileIdentity {
-    dev: u64,
-    ino: u64,
+    volume: u64,
+    file_id: [u8; 16],
     is_dir: bool,
 }
 
@@ -151,19 +153,92 @@ struct FileIdentity {
 fn file_identity(meta: &fs::Metadata) -> FileIdentity {
     use std::os::unix::fs::MetadataExt;
     FileIdentity {
-        dev: meta.dev(),
-        ino: meta.ino(),
+        volume: meta.dev(),
+        file_id: {
+            let mut file_id = [0; 16];
+            file_id[..8].copy_from_slice(&meta.ino().to_le_bytes());
+            file_id
+        },
         is_dir: meta.is_dir(),
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn file_identity(meta: &fs::Metadata) -> FileIdentity {
     FileIdentity {
-        dev: 0,
-        ino: 0,
+        volume: 0,
+        file_id: [0; 16],
         is_dir: meta.is_dir(),
     }
+}
+
+#[cfg(not(windows))]
+fn file_identity_from_path(_path: &Path, meta: &fs::Metadata) -> Result<FileIdentity, String> {
+    Ok(file_identity(meta))
+}
+
+#[cfg(windows)]
+fn file_identity_from_path(path: &Path, meta: &fs::Metadata) -> Result<FileIdentity, String> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+    };
+
+    let flags = if meta.is_dir() {
+        FILE_FLAG_BACKUP_SEMANTICS
+    } else {
+        0
+    } | FILE_FLAG_OPEN_REPARSE_POINT;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(|error| format!("file identity handle unavailable: {error}"))?;
+    let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            &mut info as *mut FILE_ID_INFO as *mut std::ffi::c_void,
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err("file identity unavailable; cleanup is disabled for this entry".into());
+    }
+    let mut filesystem = [0u16; 32];
+    let volume_ok = unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    };
+    let filesystem = String::from_utf16_lossy(&filesystem)
+        .trim_end_matches('\0')
+        .to_ascii_uppercase();
+    if volume_ok == 0 || filesystem != "NTFS" {
+        return Err("cleanup identity is supported only on NTFS volumes".into());
+    }
+    if info.VolumeSerialNumber == 0 || info.FileId.Identifier.iter().all(|byte| *byte == 0) {
+        return Err(
+            "file identity is unreliable on this filesystem; cleanup is disabled for this entry"
+                .into(),
+        );
+    }
+    Ok(FileIdentity {
+        volume: info.VolumeSerialNumber,
+        file_id: info.FileId.Identifier,
+        is_dir: meta.is_dir(),
+    })
 }
 
 #[derive(Clone)]
@@ -240,6 +315,9 @@ struct TreeJobInternal {
 }
 
 struct AppState {
+    // Immutable platform state stays outside the deletion/snapshot mutex so
+    // status, preferences and map commands never wait on a long cleanup.
+    home: PathBuf,
     engine: Arc<Mutex<EngineState>>,
     scan_jobs: Arc<Mutex<BTreeMap<String, ScanJobInternal>>>,
     tree_jobs: Arc<Mutex<BTreeMap<String, TreeJobInternal>>>,
@@ -260,6 +338,11 @@ fn canonical_home_from(value: Option<PathBuf>) -> Result<PathBuf, String> {
 }
 
 fn canonical_home() -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        return canonical_home_from(std::env::var_os("USERPROFILE").map(PathBuf::from));
+    }
+    #[cfg(not(windows))]
     canonical_home_from(std::env::var_os("HOME").map(PathBuf::from))
 }
 
@@ -277,10 +360,60 @@ fn expand_under_home(input: &str, home: &Path) -> PathBuf {
 }
 
 fn is_protected(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    PROTECTED_FRAGMENTS
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    #[cfg(windows)]
+    {
+        return PROTECTED_SUFFIXES.iter().any(|needle| {
+            parts.windows(needle.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(needle.iter())
+                    .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+            })
+        });
+    }
+    #[cfg(not(windows))]
+    PROTECTED_SUFFIXES
         .iter()
-        .any(|fragment| text == *fragment || text.starts_with(&format!("{fragment}/")))
+        .any(|needle| parts.windows(needle.len()).any(|window| window == *needle))
+}
+
+fn is_never_name(name: &str) -> bool {
+    #[cfg(windows)]
+    return NEVER_NAMES
+        .iter()
+        .any(|blocked| name.eq_ignore_ascii_case(blocked));
+    #[cfg(not(windows))]
+    NEVER_NAMES.contains(&name)
+}
+
+fn remove_authorized_candidate(path: &Path, is_dir: bool) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY,
+        };
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        if attributes != u32::MAX && attributes & FILE_ATTRIBUTE_READONLY != 0 {
+            // This is deliberately non-recursive and runs only after the
+            // snapshot/preflight identity check for this exact candidate.
+            if unsafe { SetFileAttributesW(wide.as_ptr(), attributes & !FILE_ATTRIBUTE_READONLY) }
+                == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    if is_dir {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
 }
 
 fn canonical_roots(roots: &[String], home: &Path) -> (Vec<PathBuf>, Vec<String>) {
@@ -311,6 +444,8 @@ fn canonical_roots(roots: &[String], home: &Path) -> (Vec<PathBuf>, Vec<String>)
 }
 
 fn safe_metadata(path: &Path) -> Result<(PathBuf, fs::Metadata), String> {
+    #[cfg(windows)]
+    windows_path_safety(path)?;
     let link = fs::symlink_metadata(path).map_err(|e| format!("metadata failed: {e}"))?;
     if link.file_type().is_symlink() {
         return Err("symlink".into());
@@ -326,36 +461,141 @@ fn safe_metadata(path: &Path) -> Result<(PathBuf, fs::Metadata), String> {
     Ok((canonical, meta))
 }
 
-fn du_bytes(path: &Path) -> u64 {
-    if let Ok(out) = Command::new("du").arg("-sk").arg(path).output() {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                if let Some(Ok(kb)) = s.split_whitespace().next().map(str::parse::<u64>) {
-                    return kb * 1024;
-                }
-            }
+#[cfg(windows)]
+fn windows_path_safety(path: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+        FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
+    for ancestor in path.ancestors() {
+        let wide = windows_verbatim_wide(ancestor);
+        let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        if attributes == u32::MAX {
+            return Err("file attributes are unavailable".into());
+        }
+        if attributes
+            & (FILE_ATTRIBUTE_REPARSE_POINT
+                | FILE_ATTRIBUTE_OFFLINE
+                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+            != 0
+        {
+            return Err("reparse or cloud-placeholder paths are not eligible for cleanup".into());
         }
     }
-    walk_size(path)
+    Ok(())
 }
 
-fn walk_size(path: &Path) -> u64 {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return 0;
+#[cfg(windows)]
+fn windows_verbatim_wide(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    // Verbatim Win32 paths do not normalize forward slashes, and lossy UTF-8
+    // conversion would change legal Windows filenames containing lone UTF-16
+    // surrogates. Preserve the OS string throughout.
+    let raw: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|c| if c == 47 { 92 } else { c })
+        .collect();
+    let mut verbatim = if raw.starts_with(&[92, 92, 63, 92]) {
+        raw
+    } else if raw.starts_with(&[92, 92]) {
+        r"\\?\UNC\"
+            .encode_utf16()
+            .chain(raw.into_iter().skip(2))
+            .collect()
+    } else {
+        r"\\?\".encode_utf16().chain(raw).collect()
     };
-    if meta.file_type().is_symlink() {
-        return 0;
+    verbatim.push(0);
+    verbatim
+}
+
+#[cfg(windows)]
+type SeenFiles = BTreeSet<(u64, [u8; 16])>;
+#[cfg(all(not(unix), not(windows)))]
+type SeenFiles = BTreeSet<PathBuf>;
+
+enum MeasurementCommandError {
+    TimedOut,
+    Failed,
+}
+
+fn output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Output, MeasurementCommandError> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|_| MeasurementCommandError::Failed)?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|_| MeasurementCommandError::Failed)
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(MeasurementCommandError::TimedOut);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return Err(MeasurementCommandError::Failed),
+        }
     }
-    if meta.is_file() {
-        return meta.len();
+}
+
+fn du_bytes(path: &Path) -> Option<u64> {
+    let mut command = Command::new("du");
+    command.arg("-sk").arg(path);
+    match output_with_timeout(&mut command, EXTERNAL_MEASUREMENT_TIMEOUT) {
+        Ok(out) => {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    if let Some(Ok(kb)) = s.split_whitespace().next().map(str::parse::<u64>) {
+                        return Some(kb * 1024);
+                    }
+                }
+            }
+            walk_size(path)
+        }
+        // A timed-out external command has already been terminated and reaped.
+        // Do not immediately restart a second unbounded walk of the same path.
+        Err(MeasurementCommandError::TimedOut) => None,
+        Err(MeasurementCommandError::Failed) => walk_size(path),
     }
-    fs::read_dir(path)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| walk_size(&entry.path()))
-        .sum()
+}
+
+fn walk_size(path: &Path) -> Option<u64> {
+    let mut pending = vec![path.to_path_buf()];
+    let mut bytes = 0u64;
+    let mut visited = 0usize;
+    while let Some(current) = pending.pop() {
+        visited += 1;
+        if visited > MAX_SAFE_SIZE_ENTRIES {
+            return None;
+        }
+        #[cfg(windows)]
+        if windows_path_safety(&current).is_err() {
+            return None;
+        }
+        let meta = fs::symlink_metadata(&current).ok()?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_file() {
+            bytes = bytes.checked_add(meta.len())?;
+            continue;
+        }
+        let entries = fs::read_dir(&current).ok()?;
+        for entry in entries {
+            pending.push(entry.ok()?.path());
+        }
+    }
+    Some(bytes)
 }
 
 fn add_candidate(
@@ -375,7 +615,7 @@ fn add_candidate(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    if NEVER_NAMES.contains(&name) {
+    if is_never_name(name) {
         return;
     }
     if candidates
@@ -384,6 +624,10 @@ fn add_candidate(
     {
         return;
     }
+    let identity = match file_identity_from_path(&canonical_path, &meta) {
+        Ok(identity) => identity,
+        Err(_) => return,
+    };
     let id = state.next_id("candidate");
     candidates.insert(
         id.clone(),
@@ -393,8 +637,10 @@ fn add_candidate(
             rule_id: rule.id.into(),
             tier: rule.tier,
             canonical_path,
-            identity: file_identity(&meta),
-            size: du_bytes(&path),
+            identity,
+            // Filled in one globally-deduped, cancellable pass after all
+            // candidates are discovered.
+            size: 0,
             restore: rule.restore.map(str::to_string),
             policy_fingerprint: POLICY_FINGERPRINT.into(),
         },
@@ -406,52 +652,141 @@ fn rule_for_id(rule_id: &str) -> Option<Rule> {
 }
 
 #[cfg(unix)]
-fn logical_bytes_with_dedupe(path: &Path, seen: &mut BTreeSet<(u64, u64)>) -> u64 {
+fn logical_bytes_with_dedupe(
+    path: &Path,
+    seen: &mut BTreeSet<(u64, u64)>,
+    cancelled: &AtomicBool,
+) -> Result<(u64, bool), String> {
     use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if meta.file_type().is_symlink() {
-        return 0;
-    }
-    if meta.is_file() {
-        return if seen.insert((meta.dev(), meta.ino())) {
-            meta.len()
-        } else {
-            0
+    let mut pending = vec![path.to_path_buf()];
+    let mut bytes = 0;
+    let mut partial = false;
+    while let Some(current) = pending.pop() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("scan cancelled".into());
+        }
+        #[cfg(windows)]
+        if windows_path_safety(&current).is_err() {
+            partial = true;
+            continue;
+        }
+        let meta = match fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(_) => {
+                partial = true;
+                continue;
+            }
         };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_file() {
+            if seen.insert((meta.dev(), meta.ino())) {
+                bytes += meta.len();
+            }
+            continue;
+        }
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => {
+                partial = true;
+                continue;
+            }
+        };
+        for entry in entries {
+            match entry {
+                Ok(entry) => pending.push(entry.path()),
+                Err(_) => partial = true,
+            }
+        }
     }
-    fs::read_dir(path)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| logical_bytes_with_dedupe(&entry.path(), seen))
-        .sum()
+    Ok((bytes, partial))
 }
 
 #[cfg(not(unix))]
-fn logical_bytes_with_dedupe(path: &Path, seen: &mut BTreeSet<PathBuf>) -> u64 {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if meta.file_type().is_symlink() {
-        return 0;
-    }
-    if meta.is_file() {
-        return if seen.insert(path.to_path_buf()) {
-            meta.len()
-        } else {
-            0
+fn logical_bytes_with_dedupe(
+    path: &Path,
+    seen: &mut SeenFiles,
+    cancelled: &AtomicBool,
+) -> Result<(u64, bool), String> {
+    let mut pending = vec![path.to_path_buf()];
+    let mut bytes = 0;
+    let mut partial = false;
+    while let Some(current) = pending.pop() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("scan cancelled".into());
+        }
+        #[cfg(windows)]
+        if windows_path_safety(&current).is_err() {
+            partial = true;
+            continue;
+        }
+        let meta = match fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(_) => {
+                partial = true;
+                continue;
+            }
         };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_file() {
+            #[cfg(windows)]
+            let key = match file_identity_from_path(&current, &meta) {
+                Ok(identity) => (identity.volume, identity.file_id),
+                Err(_) => {
+                    partial = true;
+                    continue;
+                }
+            };
+            #[cfg(not(windows))]
+            let key = current;
+            if seen.insert(key) {
+                bytes += meta.len();
+            }
+            continue;
+        }
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => {
+                partial = true;
+                continue;
+            }
+        };
+        for entry in entries {
+            match entry {
+                Ok(entry) => pending.push(entry.path()),
+                Err(_) => partial = true,
+            }
+        }
     }
-    fs::read_dir(path)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| logical_bytes_with_dedupe(&entry.path(), seen))
-        .sum()
+    Ok((bytes, partial))
+}
+
+fn assign_candidate_measurements(
+    candidates: &mut BTreeMap<String, CandidateInternal>,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    let mut ids: Vec<String> = candidates.keys().cloned().collect();
+    ids.sort_by(|left, right| {
+        candidates[left]
+            .canonical_path
+            .cmp(&candidates[right].canonical_path)
+    });
+    let mut partial = false;
+    #[cfg(unix)]
+    let mut seen = BTreeSet::<(u64, u64)>::new();
+    #[cfg(not(unix))]
+    let mut seen = SeenFiles::new();
+    for id in ids {
+        let candidate = candidates.get_mut(&id).ok_or("candidate disappeared")?;
+        let (bytes, was_partial) =
+            logical_bytes_with_dedupe(&candidate.canonical_path, &mut seen, cancelled)?;
+        candidate.size = bytes;
+        partial |= was_partial;
+    }
+    Ok(partial)
 }
 
 fn current_unix_seconds() -> u64 {
@@ -466,6 +801,7 @@ fn cleanup_breakdown_snapshot(
     home: &Path,
     candidates: &BTreeMap<String, CandidateInternal>,
     skipped_roots: &[String],
+    measurement_partial: bool,
 ) -> CleanupBreakdownSnapshot {
     let mut selected: Vec<&CandidateInternal> = candidates
         .values()
@@ -489,18 +825,13 @@ fn cleanup_breakdown_snapshot(
         }
     }
     let mut totals = BTreeMap::<CleanupCategoryId, (usize, u64)>::new();
-    #[cfg(unix)]
-    let mut seen = BTreeSet::<(u64, u64)>::new();
-    #[cfg(not(unix))]
-    let mut seen = BTreeSet::<PathBuf>::new();
     for candidate in accepted_roots {
         let Some(rule) = rule_for_id(&candidate.rule_id) else {
             continue;
         };
-        let measured = logical_bytes_with_dedupe(&candidate.canonical_path, &mut seen);
         let total = totals.entry(rule.cleanup_category).or_insert((0, 0));
         total.0 += 1;
-        total.1 += measured;
+        total.1 += candidate.size;
     }
     let volume = volume_stats(home);
     CleanupBreakdownSnapshot {
@@ -511,7 +842,7 @@ fn cleanup_breakdown_snapshot(
         measurement_kind: "logicalFallback".into(),
         completed_at: current_unix_seconds(),
         scope: "exactRuleEngineHome".into(),
-        is_partial: !skipped_roots.is_empty() || invalid_candidates > 0,
+        is_partial: !skipped_roots.is_empty() || invalid_candidates > 0 || measurement_partial,
         skipped_roots: skipped_roots.to_vec(),
         categories: totals
             .into_iter()
@@ -569,6 +900,7 @@ where
         }
         progress(index + 1, total_rules, format!("Scanned {}", rule.title));
     }
+    let measurement_partial = assign_candidate_measurements(&mut candidates, cancelled)?;
     let mut categories = Vec::new();
     for rule in RULES {
         let mut entries: Vec<Entry> = candidates
@@ -596,8 +928,13 @@ where
             });
         }
     }
-    let breakdown =
-        cleanup_breakdown_snapshot(&snapshot_id, &state.home, &candidates, &skipped_roots);
+    let breakdown = cleanup_breakdown_snapshot(
+        &snapshot_id,
+        &state.home,
+        &candidates,
+        &skipped_roots,
+        measurement_partial,
+    );
     state
         .snapshots
         .insert(snapshot_id.clone(), SnapshotInternal { candidates });
@@ -628,14 +965,11 @@ fn validate_candidate(candidate: &CandidateInternal, home: &Path) -> Result<(), 
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    if NEVER_NAMES.contains(&name) {
+    if is_never_name(name) {
         return Err("protected name".into());
     }
-    let current = file_identity(&meta);
-    if current.dev != candidate.identity.dev
-        || current.ino != candidate.identity.ino
-        || current.is_dir != candidate.identity.is_dir
-    {
+    let current = file_identity_from_path(&canonical, &meta)?;
+    if current != candidate.identity {
         return Err("file identity changed since scan".into());
     }
     Ok(())
@@ -667,6 +1001,7 @@ struct CleanResult {
     run_id: Option<String>,
     record_error: Option<String>,
     freed: u64,
+    freed_size_unknown: bool,
     outcomes: Vec<CandidateOutcome>,
     deleted: Vec<String>,
     skipped: Vec<String>,
@@ -687,8 +1022,25 @@ struct RunRecord {
     outcomes: Vec<CandidateOutcome>,
 }
 
+fn app_data_dir(home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        #[cfg(test)]
+        return home.join("AppData/Roaming/Deslop");
+        #[cfg(not(test))]
+        // APPDATA is the roaming per-user data location. A missing value is
+        // confined to the validated profile; it never falls back to cwd or /.
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Roaming"))
+            .join("Deslop");
+    }
+    #[cfg(not(windows))]
+    home.join("Library/Application Support/Deslop")
+}
+
 fn runs_dir(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/Deslop/runs")
+    app_data_dir(home).join("runs")
 }
 
 fn save_run_record(home: &Path, result: &CleanResult) -> Result<String, String> {
@@ -742,8 +1094,35 @@ struct VolumeStats {
     free: u64,
 }
 
+#[cfg(windows)]
 fn volume_stats(path: &Path) -> VolumeStats {
-    if let Ok(out) = Command::new("df").arg("-k").arg(path).output() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0u64;
+    let mut total = 0u64;
+    let mut free = 0u64;
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) };
+    if ok != 0 {
+        return VolumeStats {
+            id: path.to_string_lossy().into(),
+            total,
+            free: available,
+        };
+    }
+    VolumeStats {
+        id: "unknown".into(),
+        total: 0,
+        free: 0,
+    }
+}
+
+#[cfg(not(windows))]
+fn volume_stats(path: &Path) -> VolumeStats {
+    let mut command = Command::new("df");
+    command.arg("-k").arg(path);
+    if let Ok(out) = output_with_timeout(&mut command, EXTERNAL_MEASUREMENT_TIMEOUT) {
         if let Ok(text) = String::from_utf8(out.stdout) {
             if let Some(line) = text.lines().nth(1) {
                 let fields: Vec<&str> = line.split_whitespace().collect();
@@ -766,10 +1145,6 @@ fn volume_stats(path: &Path) -> VolumeStats {
 
 #[tauri::command]
 fn default_roots(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
-    let state = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?;
     let home = &state.home;
     let raw: Vec<String> = [
         "Documents",
@@ -790,28 +1165,21 @@ fn default_roots(state: tauri::State<'_, AppState>) -> Result<Vec<String>, Strin
 
 #[tauri::command]
 fn home_dir(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    Ok(state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?
-        .home
-        .to_string_lossy()
-        .to_string())
+    Ok(state.home.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn disk_info(state: tauri::State<'_, AppState>) -> Result<DiskInfo, String> {
-    let home = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?
-        .home
-        .clone();
-    let volume = volume_stats(&home);
-    Ok(DiskInfo {
-        total: volume.total,
-        free: volume.free,
+async fn disk_info(state: tauri::State<'_, AppState>) -> Result<DiskInfo, String> {
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let volume = volume_stats(&home);
+        Ok(DiskInfo {
+            total: volume.total,
+            free: volume.free,
+        })
     })
+    .await
+    .map_err(|error| format!("disk information task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -860,31 +1228,73 @@ fn start_scan(
                 cancel: cancel.clone(),
             },
         );
+    // Take only immutable startup data while holding the shared engine lock.
+    // Filesystem traversal and measurement happen on the worker without
+    // blocking navigation, preferences, cancellation, or status commands.
+    let home = state.home.clone();
+    let snapshot_id = format!("snapshot-from-{id}");
     let engine = state.engine.clone();
     let jobs = state.scan_jobs.clone();
     std::thread::spawn(move || {
         let progress_jobs = jobs.clone();
         let progress_id = id.clone();
-        let result = match engine.lock() {
-            Ok(mut engine) => scan_snapshot_with_progress(
-                &mut engine,
-                &roots,
-                only,
-                &cancel,
-                |completed, total, message| {
-                    if let Ok(mut jobs) = progress_jobs.lock() {
-                        if let Some(job) = jobs.get_mut(&progress_id) {
-                            job.status.completed_rules = completed;
-                            job.status.total_rules = total;
-                            job.status.message = message;
-                        }
+        let mut worker = EngineState::new(home);
+        let result = scan_snapshot_with_progress(
+            &mut worker,
+            &roots,
+            only,
+            &cancel,
+            |completed, total, message| {
+                if let Ok(mut jobs) = progress_jobs.lock() {
+                    if let Some(job) = jobs.get_mut(&progress_id) {
+                        job.status.completed_rules = completed;
+                        job.status.total_rules = total;
+                        job.status.message = message;
                     }
-                },
-            ),
-            Err(_) => Err("engine state unavailable".into()),
+                }
+            },
+        );
+        let result = if cancel.load(Ordering::Relaxed) {
+            Err("scan cancelled".into())
+        } else {
+            result
+        };
+        // Attaching the immutable snapshot can wait behind clean's engine
+        // mutex. Do that before acquiring the jobs mutex, so cancel/status
+        // remain responsive while cleanup is active.
+        let result = match result {
+            Ok(mut snapshot) => {
+                let old_snapshot_id = snapshot.id.clone();
+                if let Some(mut internal) = worker.snapshots.remove(&old_snapshot_id) {
+                    for candidate in internal.candidates.values_mut() {
+                        candidate.snapshot_id = snapshot_id.clone();
+                    }
+                    snapshot.id = snapshot_id.clone();
+                    snapshot.breakdown.snapshot_id = snapshot_id.clone();
+                    match engine.lock() {
+                        Ok(mut engine) => {
+                            engine.snapshots.insert(snapshot_id, internal);
+                            Ok(snapshot)
+                        }
+                        Err(_) => Err("engine state unavailable".into()),
+                    }
+                } else {
+                    Err("scan snapshot state unavailable".into())
+                }
+            }
+            Err(error) => Err(error),
         };
         if let Ok(mut jobs) = jobs.lock() {
             if let Some(job) = jobs.get_mut(&id) {
+                // Serialize the terminal decision with cancellation. A cancel
+                // that arrives after the worker's last filesystem check still
+                // wins over a completed result.
+                let result =
+                    if job.cancel.load(Ordering::Relaxed) || job.status.phase == "cancelling" {
+                        Err("scan cancelled".into())
+                    } else {
+                        result
+                    };
                 match result {
                     Ok(snapshot) => {
                         job.status.phase = "completed".into();
@@ -935,16 +1345,18 @@ fn cancel_scan(state: tauri::State<'_, AppState>, id: String) -> Result<ScanJobS
 }
 
 #[tauri::command]
-fn preflight(
+async fn preflight(
     state: tauri::State<'_, AppState>,
     snapshot_id: String,
     candidate_ids: Vec<String>,
 ) -> Result<Preflight, String> {
-    let mut state = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?;
-    create_preflight(&mut state, snapshot_id, candidate_ids)
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut state = engine.lock().map_err(|_| "engine state unavailable")?;
+        create_preflight(&mut state, snapshot_id, candidate_ids)
+    })
+    .await
+    .map_err(|error| format!("preflight task failed: {error}"))?
 }
 
 fn create_preflight(
@@ -1043,16 +1455,18 @@ fn running_apps_for_rule(rule_id: &str) -> Vec<String> {
 }
 
 #[tauri::command]
-fn clean(
+async fn clean(
     state: tauri::State<'_, AppState>,
     preflight_id: String,
     confirm_yellow: bool,
 ) -> Result<CleanResult, String> {
-    let mut state = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?;
-    clean_engine(&mut state, preflight_id, confirm_yellow)
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut state = engine.lock().map_err(|_| "engine state unavailable")?;
+        clean_engine(&mut state, preflight_id, confirm_yellow)
+    })
+    .await
+    .map_err(|error| format!("cleanup task failed: {error}"))?
 }
 
 fn clean_engine(
@@ -1078,6 +1492,7 @@ fn clean_engine(
         return Err("YELLOW entries require explicit preflight confirmation".into());
     }
     let mut freed = 0;
+    let mut freed_size_unknown = false;
     let mut outcomes = Vec::new();
     let mut deleted = Vec::new();
     let mut skipped = Vec::new();
@@ -1101,14 +1516,28 @@ fn clean_engine(
             }
             Ok(()) => {
                 let bytes = du_bytes(&path);
-                let result = if candidate.identity.is_dir {
-                    fs::remove_dir_all(&path)
-                } else {
-                    fs::remove_file(&path)
-                };
+                // Measurement can take long enough for a concurrent rename or
+                // replacement. Revalidate identity immediately before the
+                // only destructive operation (and before clearing read-only).
+                if let Err(detail) = validate_candidate(candidate, &state.home) {
+                    skipped.push(format!("{} — {detail}", path.display()));
+                    outcomes.push(CandidateOutcome {
+                        id: id.clone(),
+                        path: path.to_string_lossy().to_string(),
+                        status: "skipped".into(),
+                        detail,
+                        freed: 0,
+                    });
+                    continue;
+                }
+                let result = remove_authorized_candidate(&path, candidate.identity.is_dir);
                 match result {
                     Ok(()) => {
-                        freed += bytes;
+                        if let Some(bytes) = bytes {
+                            freed += bytes;
+                        } else {
+                            freed_size_unknown = true;
+                        }
                         deleted.push(path.to_string_lossy().to_string());
                         if let Some(hint) = &candidate.restore {
                             reinstall.insert(path.to_string_lossy().to_string(), hint.clone());
@@ -1117,8 +1546,13 @@ fn clean_engine(
                             id: id.clone(),
                             path: path.to_string_lossy().to_string(),
                             status: "deleted".into(),
-                            detail: "deleted after identity revalidation".into(),
-                            freed: bytes,
+                            detail: if bytes.is_some() {
+                                "deleted after identity revalidation".into()
+                            } else {
+                                "deleted after identity revalidation; size measurement timed out"
+                                    .into()
+                            },
+                            freed: bytes.unwrap_or(0),
                         });
                     }
                     Err(error) => {
@@ -1140,6 +1574,7 @@ fn clean_engine(
         run_id: None,
         record_error: None,
         freed,
+        freed_size_unknown,
         outcomes,
         deleted,
         skipped,
@@ -1155,10 +1590,6 @@ fn clean_engine(
 
 #[tauri::command]
 fn run_history(state: tauri::State<'_, AppState>) -> Result<Vec<RunRecord>, String> {
-    let state = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?;
     Ok(load_run_history(&state.home))
 }
 
@@ -1249,7 +1680,7 @@ fn default_preferences() -> AppPreferences {
 }
 
 fn preferences_path(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/Deslop/preferences.json")
+    app_data_dir(home).join("preferences.json")
 }
 
 fn load_preferences(home: &Path) -> PreferencesResponse {
@@ -1311,13 +1742,7 @@ fn validated_map_folder(path: &str) -> Result<String, String> {
 
 #[tauri::command]
 fn get_preferences(state: tauri::State<'_, AppState>) -> Result<PreferencesResponse, String> {
-    let home = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?
-        .home
-        .clone();
-    Ok(load_preferences(&home))
+    Ok(load_preferences(&state.home))
 }
 
 #[tauri::command]
@@ -1325,12 +1750,7 @@ fn update_preferences(
     state: tauri::State<'_, AppState>,
     patch: AppPreferencesPatch,
 ) -> Result<AppPreferences, String> {
-    let home = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?
-        .home
-        .clone();
+    let home = state.home.clone();
     let mut preferences = load_preferences(&home).preferences;
     if let Some(locale) = patch.locale {
         preferences.locale = locale;
@@ -1363,12 +1783,7 @@ fn update_preferences(
 
 #[tauri::command]
 fn reset_preferences(state: tauri::State<'_, AppState>) -> Result<AppPreferences, String> {
-    let home = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?
-        .home
-        .clone();
+    let home = state.home.clone();
     let path = preferences_path(&home);
     match fs::remove_file(path) {
         Ok(()) => {}
@@ -1386,6 +1801,7 @@ struct TreeNode {
     path: String,
     size: u64,
     is_dir: bool,
+    can_reveal: bool,
     cleanup_rule_id: Option<String>,
     children: Vec<TreeNode>,
 }
@@ -1394,7 +1810,14 @@ struct TreeNode {
 struct MapSnapshot {
     id: String,
     created_at: u64,
+    is_partial: bool,
+    skipped_nodes: usize,
     root: TreeNode,
+}
+
+#[derive(Default)]
+struct TreeTraversalStats {
+    skipped_nodes: usize,
 }
 
 #[derive(Clone)]
@@ -1412,21 +1835,49 @@ fn walk_size_with_cancel(
     path: &Path,
     cancel: &AtomicBool,
     visited: &mut usize,
+    stats: &mut TreeTraversalStats,
 ) -> Result<u64, String> {
-    if cancel.load(Ordering::Relaxed) {
-        return Err("tree scan cancelled".into());
-    }
-    *visited += 1;
-    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if meta.file_type().is_symlink() {
-        return Ok(0);
-    }
-    if meta.is_file() {
-        return Ok(meta.len());
-    }
+    // The depth limit hands the rest of a subtree to this iterative walker so
+    // a deep fixture cannot overflow the thread stack.
+    let mut pending = vec![path.to_path_buf()];
     let mut total = 0;
-    for entry in fs::read_dir(path).map_err(|e| e.to_string())?.flatten() {
-        total += walk_size_with_cancel(&entry.path(), cancel, visited)?;
+    while let Some(current) = pending.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("tree scan cancelled".into());
+        }
+        #[cfg(windows)]
+        if windows_path_safety(&current).is_err() {
+            stats.skipped_nodes += 1;
+            continue;
+        }
+        *visited += 1;
+        let meta = match fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(_) => {
+                stats.skipped_nodes += 1;
+                continue;
+            }
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_file() {
+            total += meta.len();
+            continue;
+        }
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => {
+                stats.skipped_nodes += 1;
+                continue;
+            }
+        };
+        for entry in entries {
+            match entry {
+                Ok(entry) => pending.push(entry.path()),
+                Err(_) => stats.skipped_nodes += 1,
+            }
+        }
     }
     Ok(total)
 }
@@ -1437,6 +1888,7 @@ fn build_node_with_progress<F>(
     max_depth: usize,
     min_size: u64,
     cancel: &AtomicBool,
+    stats: &mut TreeTraversalStats,
     progress: &mut F,
 ) -> Result<TreeNode, String>
 where
@@ -1451,6 +1903,8 @@ where
         .unwrap_or_else(|| path.to_str().unwrap_or("/"))
         .to_string();
     let path_string = path.to_string_lossy().to_string();
+    #[cfg(windows)]
+    windows_path_safety(path)?;
     let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if meta.file_type().is_symlink() {
         return Ok(TreeNode {
@@ -1459,6 +1913,7 @@ where
             path: path_string,
             size: 0,
             is_dir: false,
+            can_reveal: false,
             cleanup_rule_id: None,
             children: vec![],
         });
@@ -1470,13 +1925,14 @@ where
             path: path_string,
             size: meta.len(),
             is_dir: false,
+            can_reveal: false,
             cleanup_rule_id: None,
             children: vec![],
         });
     }
     if depth >= max_depth {
         let mut visited = 0;
-        let size = walk_size_with_cancel(path, cancel, &mut visited)?;
+        let size = walk_size_with_cancel(path, cancel, &mut visited, stats)?;
         progress(visited);
         return Ok(TreeNode {
             id: String::new(),
@@ -1484,20 +1940,33 @@ where
             path: path_string,
             size,
             is_dir: true,
+            can_reveal: false,
             cleanup_rule_id: None,
             children: vec![],
         });
     }
     let mut children = Vec::new();
-    for entry in fs::read_dir(path).map_err(|e| e.to_string())?.flatten() {
-        children.push(build_node_with_progress(
+    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                stats.skipped_nodes += 1;
+                continue;
+            }
+        };
+        match build_node_with_progress(
             &entry.path(),
             depth + 1,
             max_depth,
             min_size,
             cancel,
+            stats,
             progress,
-        )?);
+        ) {
+            Ok(child) => children.push(child),
+            Err(error) if error == "tree scan cancelled" => return Err(error),
+            Err(_) => stats.skipped_nodes += 1,
+        }
     }
     Ok(aggregate_small(
         TreeNode {
@@ -1506,6 +1975,7 @@ where
             path: path_string,
             size: 0,
             is_dir: true,
+            can_reveal: false,
             cleanup_rule_id: None,
             children,
         },
@@ -1528,6 +1998,7 @@ fn aggregate_small(mut node: TreeNode, min_size: u64) -> TreeNode {
             path: node.path.clone(),
             size: small_size,
             is_dir: true,
+            can_reveal: false,
             cleanup_rule_id: None,
             children: vec![],
         });
@@ -1559,6 +2030,13 @@ fn materialize_map_node(
         .into_iter()
         .map(|child| materialize_map_node(child, home, root, snapshot_id, next_node, nodes))
         .collect();
+    // Every display node needs an identity for React selection. Synthetic and
+    // unavailable nodes deliberately receive an ID that is never registered
+    // as a Finder-reveal capability.
+    let id = format!("map-node-{snapshot_id}-{}", *next_node);
+    *next_node += 1;
+    node.id = id.clone();
+    node.can_reveal = false;
     if node.name.starts_with('…') {
         return node;
     }
@@ -1568,15 +2046,17 @@ fn materialize_map_node(
     if !canonical_path.starts_with(root) {
         return node;
     }
-    let id = format!("map-node-{snapshot_id}-{}", *next_node);
-    *next_node += 1;
+    let identity = match file_identity_from_path(&canonical_path, &meta) {
+        Ok(identity) => identity,
+        Err(_) => return node,
+    };
     node.cleanup_rule_id = rules::exact_rule_for_path(&canonical_path, home).map(str::to_string);
-    node.id = id.clone();
+    node.can_reveal = true;
     nodes.insert(
         id,
         MapNodeInternal {
             canonical_path,
-            identity: file_identity(&meta),
+            identity,
         },
     );
     node
@@ -1587,6 +2067,7 @@ fn create_map_snapshot(
     home: &Path,
     root: &Path,
     snapshot_id: String,
+    stats: TreeTraversalStats,
 ) -> (MapSnapshot, MapSnapshotInternal) {
     let mut nodes = BTreeMap::new();
     let mut next_node = 1;
@@ -1600,6 +2081,8 @@ fn create_map_snapshot(
         MapSnapshot {
             id: snapshot_id,
             created_at,
+            is_partial: stats.skipped_nodes > 0,
+            skipped_nodes: stats.skipped_nodes,
             root: root_node,
         },
         MapSnapshotInternal {
@@ -1621,7 +2104,7 @@ fn resolve_map_node(
     if !canonical_path.starts_with(&snapshot.root) {
         return Err("map node escaped its snapshot root".into());
     }
-    if file_identity(&meta) != node.identity {
+    if file_identity_from_path(&canonical_path, &meta)? != node.identity {
         return Err("map node changed since the snapshot".into());
     }
     Ok(canonical_path)
@@ -1634,12 +2117,7 @@ fn start_tree_scan(
     max_depth: Option<usize>,
     min_size: Option<u64>,
 ) -> Result<TreeJobStatus, String> {
-    let home = state
-        .engine
-        .lock()
-        .map_err(|_| "engine state unavailable")?
-        .home
-        .clone();
+    let home = state.home.clone();
     let canonical = resolve_map_root(&root, &home)?;
     let id = format!(
         "tree-job-{}",
@@ -1670,12 +2148,14 @@ fn start_tree_scan(
     std::thread::spawn(move || {
         let progress_jobs = jobs.clone();
         let progress_id = id.clone();
+        let mut stats = TreeTraversalStats::default();
         let result = build_node_with_progress(
             &canonical,
             0,
             max_depth.unwrap_or(6),
             min_size.unwrap_or(20 * 1024 * 1024),
             &cancel,
+            &mut stats,
             &mut |visited| {
                 if let Ok(mut jobs) = progress_jobs.lock() {
                     if let Some(job) = jobs.get_mut(&progress_id) {
@@ -1686,21 +2166,36 @@ fn start_tree_scan(
                 }
             },
         );
+        // Snapshot materialization touches the filesystem; never perform it
+        // while status/cancel callers are waiting on the jobs mutex.
+        let result = match result {
+            Ok(tree) if !cancel.load(Ordering::Relaxed) => {
+                let snapshot_id = format!("map-snapshot-{id}");
+                let (snapshot, internal) =
+                    create_map_snapshot(tree, &home, &canonical, snapshot_id.clone(), stats);
+                if cancel.load(Ordering::Relaxed) {
+                    Err("tree scan cancelled".into())
+                } else if let Ok(mut snapshots) = map_snapshots.lock() {
+                    snapshots.insert(snapshot_id, internal);
+                    Ok(snapshot)
+                } else {
+                    Err("map snapshot state unavailable".into())
+                }
+            }
+            Ok(_) => Err("tree scan cancelled".into()),
+            Err(_) if cancel.load(Ordering::Relaxed) => Err("tree scan cancelled".into()),
+            Err(error) => Err(error),
+        };
         if let Ok(mut jobs) = jobs.lock() {
             if let Some(job) = jobs.get_mut(&id) {
+                let result =
+                    if job.cancel.load(Ordering::Relaxed) || job.status.phase == "cancelling" {
+                        Err("tree scan cancelled".into())
+                    } else {
+                        result
+                    };
                 match result {
-                    Ok(tree) => {
-                        let snapshot_id = format!("map-snapshot-{id}");
-                        let (snapshot, internal) =
-                            create_map_snapshot(tree, &home, &canonical, snapshot_id.clone());
-                        if let Ok(mut snapshots) = map_snapshots.lock() {
-                            snapshots.insert(snapshot_id, internal);
-                        } else {
-                            job.status.phase = "failed".into();
-                            job.status.error = Some("map snapshot state unavailable".into());
-                            job.status.message = "Disk map failed".into();
-                            return;
-                        }
+                    Ok(snapshot) => {
                         job.status.phase = "completed".into();
                         job.status.message =
                             format!("Indexed {} filesystem nodes", job.status.visited_nodes);
@@ -1776,10 +2271,21 @@ fn reveal_map_node(
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let status = Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.to_string_lossy()))
+            .status()
+            .map_err(|error| format!("Explorer could not reveal the selected map node: {error}"))?;
+        if !status.success() {
+            return Err("Explorer could not reveal the selected map node".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = path;
-        Err("Finder reveal is available only on macOS".into())
+        Err("File reveal is unavailable on this platform".into())
     }
 }
 
@@ -1843,7 +2349,19 @@ fn open_external_link(kind: ExternalLinkKind) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let status = Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(url)
+            .status()
+            .map_err(|error| format!("link could not be opened: {error}"))?;
+        if !status.success() {
+            return Err("link could not be opened".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = url;
         Err("external links are available only on macOS".into())
@@ -2090,6 +2608,7 @@ fn parse_gpscan_stream<R: std::io::BufRead>(reader: R) -> Result<TreeNode, Strin
                     path,
                     size: 0,
                     is_dir: true,
+                    can_reveal: false,
                     cleanup_rule_id: None,
                     children: vec![],
                 });
@@ -2124,6 +2643,7 @@ fn parse_gpscan_stream<R: std::io::BufRead>(reader: R) -> Result<TreeNode, Strin
                         name,
                         size,
                         is_dir: false,
+                        can_reveal: false,
                         cleanup_rule_id: None,
                         children: vec![],
                     });
@@ -2142,11 +2662,20 @@ fn parse_gpscan_stream<R: std::io::BufRead>(reader: R) -> Result<TreeNode, Strin
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let home = canonical_home().expect("Deslop cannot start safely without a canonical HOME");
+    let home = match canonical_home() {
+        Ok(home) => home,
+        Err(error) => {
+            // Do not substitute cwd, `/`, or an unvalidated environment path.
+            // Startup remains fail-closed instead of panicking before Tauri.
+            eprintln!("Deslop startup disabled: {error}");
+            return;
+        }
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            engine: Arc::new(Mutex::new(EngineState::new(home))),
+            engine: Arc::new(Mutex::new(EngineState::new(home.clone()))),
+            home,
             scan_jobs: Arc::new(Mutex::new(BTreeMap::new())),
             tree_jobs: Arc::new(Mutex::new(BTreeMap::new())),
             map_snapshots: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2202,17 +2731,32 @@ mod tests {
     }
     fn fixture_candidate(path: PathBuf, rule_id: &str) -> CandidateInternal {
         let (canonical_path, meta) = safe_metadata(&path).unwrap();
+        let identity = file_identity_from_path(&canonical_path, &meta).unwrap();
         CandidateInternal {
             id: format!("fixture-{rule_id}"),
             snapshot_id: "fixture-snapshot".into(),
             rule_id: rule_id.into(),
             tier: Tier::Green,
             canonical_path,
-            identity: file_identity(&meta),
+            identity,
             size: 0,
             restore: None,
             policy_fingerprint: POLICY_FINGERPRINT.into(),
         }
+    }
+    #[test]
+    fn protected_fragments_match_real_absolute_paths() {
+        let home = Path::new("/Users/tester");
+        assert!(is_protected(&home.join(".claude/projects")));
+        assert!(is_protected(&home.join(".claude/projects/deep/nested")));
+        assert!(is_protected(&home.join(".claude/todos")));
+        assert!(is_protected(&home.join(".claude/file-history")));
+        assert!(is_protected(&home.join(".codex/sessions")));
+        assert!(is_protected(&home.join(".codex/sessions/deep/nested")));
+        assert!(!is_protected(&home.join(".claude/logs")));
+        assert!(!is_protected(&home.join(".claude-backup/projects")));
+        assert!(!is_protected(&home.join(".claude/projects-backup")));
+        assert!(!is_protected(&home.join(".codex/sessions-backup")));
     }
     #[test]
     fn home_fails_closed_when_unavailable() {
@@ -2284,6 +2828,9 @@ mod tests {
     #[test]
     fn snapshot_rejects_renderer_tampering_and_only_deletes_selected_candidate() {
         let home = fixture();
+        #[cfg(windows)]
+        let safe = home.join("AppData/Local/npm-cache");
+        #[cfg(not(windows))]
         let safe = home.join(".npm/_cacache");
         let protected = home.join(".codex/sessions/keep");
         fs::create_dir_all(&safe).unwrap();
@@ -2304,6 +2851,7 @@ mod tests {
         assert!(protected.exists());
         fs::remove_dir_all(home).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn symlink_candidate_is_rejected() {
         let home = fixture();
@@ -2341,10 +2889,115 @@ mod tests {
         fs::create_dir_all(root.join("a/b")).unwrap();
         fs::write(root.join("a/b/data"), b"12345").unwrap();
         let cancel = AtomicBool::new(false);
-        let tree = build_node_with_progress(&root, 0, 1, 0, &cancel, &mut |_| {}).unwrap();
+        let tree = build_node_with_progress(
+            &root,
+            0,
+            1,
+            0,
+            &cancel,
+            &mut TreeTraversalStats::default(),
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(tree.size, 5);
         cancel.store(true, Ordering::Relaxed);
-        assert!(build_node_with_progress(&root, 0, 1, 0, &cancel, &mut |_| {}).is_err());
+        assert!(build_node_with_progress(
+            &root,
+            0,
+            1,
+            0,
+            &cancel,
+            &mut TreeTraversalStats::default(),
+            &mut |_| {},
+        )
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn measurement_timeout_terminates_the_child_process() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 1");
+        assert!(matches!(
+            output_with_timeout(&mut command, Duration::from_millis(20)),
+            Err(MeasurementCommandError::TimedOut)
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn disk_tree_keeps_readable_siblings_when_a_child_is_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fixture();
+        fs::write(root.join("available"), b"12345").unwrap();
+        let blocked = root.join("blocked");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::write(blocked.join("hidden"), b"12345").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let mut stats = TreeTraversalStats::default();
+        let tree =
+            build_node_with_progress(&root, 0, 4, 0, &cancel, &mut stats, &mut |_| {}).unwrap();
+        assert_eq!(tree.size, 5);
+        assert!(stats.skipped_nodes > 0);
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn disk_tree_depth_limit_uses_an_iterative_size_walk() {
+        let root = fixture();
+        let mut current = root.clone();
+        for _ in 0..300 {
+            current = current.join("d");
+            fs::create_dir_all(&current).unwrap();
+        }
+        fs::write(current.join("payload"), b"123").unwrap();
+        let cancel = AtomicBool::new(false);
+        let tree = build_node_with_progress(
+            &root,
+            0,
+            2,
+            0,
+            &cancel,
+            &mut TreeTraversalStats::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(tree.size, 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn aggregate_map_nodes_are_selectable_but_never_revealable() {
+        let root = fixture();
+        fs::write(root.join("one"), b"1").unwrap();
+        fs::write(root.join("two"), b"2").unwrap();
+        let cancel = AtomicBool::new(false);
+        let tree = build_node_with_progress(
+            &root,
+            0,
+            2,
+            10,
+            &cancel,
+            &mut TreeTraversalStats::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let (snapshot, internal) = create_map_snapshot(
+            tree,
+            &canonical,
+            &canonical,
+            "map-snapshot-aggregate".into(),
+            TreeTraversalStats::default(),
+        );
+        let aggregate = &snapshot.root.children[0];
+        assert!(!aggregate.id.is_empty());
+        assert!(!aggregate.can_reveal);
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert(snapshot.id.clone(), internal);
+        assert!(resolve_map_node(&snapshots, &snapshot.id, &aggregate.id).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[cfg(unix)]
@@ -2365,8 +3018,15 @@ mod tests {
         candidates.insert("parent".into(), fixture_candidate(cache.clone(), "pkg"));
         candidates.insert("nested".into(), fixture_candidate(nested, "editors"));
         let canonical_home = home.canonicalize().unwrap();
-        let breakdown =
-            cleanup_breakdown_snapshot("fixture-snapshot", &canonical_home, &candidates, &[]);
+        let measurement_partial =
+            assign_candidate_measurements(&mut candidates, &AtomicBool::new(false)).unwrap();
+        let breakdown = cleanup_breakdown_snapshot(
+            "fixture-snapshot",
+            &canonical_home,
+            &candidates,
+            &[],
+            measurement_partial,
+        );
         assert_eq!(breakdown.measurement_kind, "logicalFallback");
         assert!(!breakdown.is_partial);
         assert_eq!(breakdown.categories.len(), 1);
@@ -2385,13 +3045,23 @@ mod tests {
         let item = root.join("cache");
         fs::write(&item, b"old").unwrap();
         let cancel = AtomicBool::new(false);
-        let tree = build_node_with_progress(&root, 0, 2, 0, &cancel, &mut |_| {}).unwrap();
+        let tree = build_node_with_progress(
+            &root,
+            0,
+            2,
+            0,
+            &cancel,
+            &mut TreeTraversalStats::default(),
+            &mut |_| {},
+        )
+        .unwrap();
         let canonical_root = root.canonicalize().unwrap();
         let (snapshot, internal) = create_map_snapshot(
             tree,
             &canonical_root,
             &canonical_root,
             "map-snapshot-test".into(),
+            TreeTraversalStats::default(),
         );
         let node_id = snapshot.root.children[0].id.clone();
         let mut snapshots = BTreeMap::new();
@@ -2472,6 +3142,202 @@ mod tests {
             external_link_url(ExternalLinkKind::BetaTestersChat),
             Some("https://t.me/+pEqQ2UBbciAyZGYy")
         );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_exact_cache_paths_keep_neighbouring_profile_data_out() {
+        let home = fixture();
+        let local = home.join("AppData/Local");
+        let roaming = home.join("AppData/Roaming");
+        let code_cache = roaming.join("Code/Cache");
+        let code_cookies = roaming.join("Code/Cookies");
+        let npm_cache = local.join("npm-cache");
+        let generic_cache = home.join("Documents/project/Cache");
+        fs::create_dir_all(&code_cache).unwrap();
+        fs::create_dir_all(&code_cookies).unwrap();
+        fs::create_dir_all(&npm_cache).unwrap();
+        fs::create_dir_all(&generic_cache).unwrap();
+        let editors = rules::windows_paths_for_locations("editors", &home, &local, &roaming);
+        let packages = rules::windows_paths_for_locations("pkg", &home, &local, &roaming);
+        assert!(editors.contains(&code_cache));
+        assert!(!editors.contains(&code_cookies));
+        assert!(packages.contains(&npm_cache));
+        assert!(!editors.contains(&generic_cache));
+        fs::remove_dir_all(home).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_identity_is_distinct_and_replacement_is_rejected() {
+        let root = fixture().join("профиль с пробелом");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::write(&first, b"one").unwrap();
+        fs::write(&second, b"two").unwrap();
+        let (_, first_meta) = safe_metadata(&first).unwrap();
+        let (_, second_meta) = safe_metadata(&second).unwrap();
+        let first_identity = file_identity_from_path(&first, &first_meta).unwrap();
+        let second_identity = file_identity_from_path(&second, &second_meta).unwrap();
+        assert_ne!(first_identity, second_identity);
+        fs::remove_file(&first).unwrap();
+        fs::write(&first, b"replacement").unwrap();
+        let (_, replacement_meta) = safe_metadata(&first).unwrap();
+        assert_ne!(
+            first_identity,
+            file_identity_from_path(&first, &replacement_meta).unwrap()
+        );
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_protected_paths_are_case_insensitive() {
+        let home = Path::new("C:\\Users\\Tester");
+        assert!(is_protected(&home.join(".CODEX/SESSIONS/keep")));
+        assert!(is_protected(&home.join(".Claude/Projects/keep")));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_readonly_is_cleared_only_for_the_authorized_entry() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            SetFileAttributesW, FILE_ATTRIBUTE_READONLY,
+        };
+
+        let root = fixture();
+        let candidate = root.join("owned-cache");
+        let sibling = root.join("sibling");
+        fs::write(&candidate, b"cache").unwrap();
+        fs::write(&sibling, b"keep").unwrap();
+        let wide: Vec<u16> = candidate.as_os_str().encode_wide().chain(Some(0)).collect();
+        assert_ne!(
+            unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_READONLY) },
+            0
+        );
+        remove_authorized_candidate(&candidate, false).unwrap();
+        assert!(!candidate.exists());
+        assert!(sibling.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_hardlinks_in_sibling_candidates_are_counted_once() {
+        let root = fixture();
+        let first = root.join("first-cache");
+        let second = root.join("second-cache");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("payload"), b"12345").unwrap();
+        fs::hard_link(first.join("payload"), second.join("payload")).unwrap();
+        let mut candidates = BTreeMap::new();
+        candidates.insert("first".into(), fixture_candidate(first, "pkg"));
+        candidates.insert("second".into(), fixture_candidate(second, "editors"));
+        assert!(!assign_candidate_measurements(&mut candidates, &AtomicBool::new(false)).unwrap());
+        assert_eq!(
+            candidates
+                .values()
+                .map(|candidate| candidate.size)
+                .sum::<u64>(),
+            5
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_locked_candidate_reports_an_error_without_touching_sibling() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = fixture();
+        let candidate = root.join("locked-cache");
+        let sibling = root.join("sibling");
+        fs::write(&candidate, b"cache").unwrap();
+        fs::write(&sibling, b"keep").unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&candidate)
+            .unwrap();
+        assert!(remove_authorized_candidate(&candidate, false).is_err());
+        assert!(sibling.exists());
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_ancestor_is_rejected_without_touching_its_target() {
+        let home = fixture();
+        let outside = fixture();
+        let link = home.join("linked-cache");
+        fs::write(outside.join("child"), b"keep").unwrap();
+        assert!(safe_metadata(&outside.join("child")).is_ok());
+        let created = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "junction fixture failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        assert!(safe_metadata(&link).is_err());
+        assert!(safe_metadata(&link.join("child")).is_err());
+        assert_eq!(fs::read(outside.join("child")).unwrap(), b"keep");
+        fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_cleanup_never_follows_a_junction_inside_an_owned_cache() {
+        let home = fixture();
+        let outside = fixture();
+        // cmd's mklink interprets slash-delimited segments as switches. Build
+        // its fixture path with native separators; the application separately
+        // tests mixed-slash and verbatim Win32 paths.
+        let cache = home.join("AppData").join("Local").join("npm-cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("cache-data"), b"cache").unwrap();
+        fs::write(outside.join("valuable"), b"keep").unwrap();
+        let link = cache.join("external");
+        let created = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "junction fixture failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let mut state = engine(&home);
+        let snapshot = scan_snapshot(&mut state, &[], Some(vec!["pkg".into()]));
+        let candidate = snapshot.categories[0].entries[0].id.clone();
+        let preflight = create_preflight(&mut state, snapshot.id, vec![candidate]).unwrap();
+        let result = clean_engine(&mut state, preflight.id, false).unwrap();
+        assert_eq!(result.deleted.len(), 1);
+        assert_eq!(fs::read(outside.join("valuable")).unwrap(), b"keep");
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_offline_attribute_is_rejected_when_supported_by_the_volume() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_OFFLINE};
+
+        let root = fixture();
+        let candidate = root.join("cloud-placeholder");
+        fs::write(&candidate, b"local").unwrap();
+        let wide: Vec<u16> = candidate.as_os_str().encode_wide().chain(Some(0)).collect();
+        if unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_OFFLINE) } != 0 {
+            assert!(windows_path_safety(&candidate).is_err());
+        } else {
+            eprintln!("SKIP: FILE_ATTRIBUTE_OFFLINE cannot be set on this fixture volume");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn gpscan_stream_parser_handles_fixture_and_rejects_unclosed_xml() {
