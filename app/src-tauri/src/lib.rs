@@ -144,8 +144,8 @@ struct CleanupBreakdownSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileIdentity {
-    dev: u64,
-    ino: u64,
+    volume: u64,
+    file_id: [u8; 16],
     is_dir: bool,
 }
 
@@ -153,8 +153,12 @@ struct FileIdentity {
 fn file_identity(meta: &fs::Metadata) -> FileIdentity {
     use std::os::unix::fs::MetadataExt;
     FileIdentity {
-        dev: meta.dev(),
-        ino: meta.ino(),
+        volume: meta.dev(),
+        file_id: {
+            let mut file_id = [0; 16];
+            file_id[..8].copy_from_slice(&meta.ino().to_le_bytes());
+            file_id
+        },
         is_dir: meta.is_dir(),
     }
 }
@@ -162,8 +166,8 @@ fn file_identity(meta: &fs::Metadata) -> FileIdentity {
 #[cfg(all(not(unix), not(windows)))]
 fn file_identity(meta: &fs::Metadata) -> FileIdentity {
     FileIdentity {
-        dev: 0,
-        ino: 0,
+        volume: 0,
+        file_id: [0; 16],
         is_dir: meta.is_dir(),
     }
 }
@@ -179,8 +183,8 @@ fn file_identity_from_path(path: &Path, meta: &fs::Metadata) -> Result<FileIdent
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT,
+        FileIdInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
     };
 
     let flags = if meta.is_dir() {
@@ -193,22 +197,46 @@ fn file_identity_from_path(path: &Path, meta: &fs::Metadata) -> Result<FileIdent
         .custom_flags(flags)
         .open(path)
         .map_err(|error| format!("file identity handle unavailable: {error}"))?;
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            &mut info as *mut FILE_ID_INFO as *mut std::ffi::c_void,
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
     if ok == 0 {
         return Err("file identity unavailable; cleanup is disabled for this entry".into());
     }
-    let dev = info.dwVolumeSerialNumber as u64;
-    let ino = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
-    if dev == 0 || ino == 0 {
+    let mut filesystem = [0u16; 32];
+    let volume_ok = unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    };
+    let filesystem = String::from_utf16_lossy(&filesystem)
+        .trim_end_matches('\0')
+        .to_ascii_uppercase();
+    if volume_ok == 0 || filesystem != "NTFS" {
+        return Err("cleanup identity is supported only on NTFS volumes".into());
+    }
+    if info.VolumeSerialNumber == 0 || info.FileId.Identifier.iter().all(|byte| *byte == 0) {
         return Err(
             "file identity is unreliable on this filesystem; cleanup is disabled for this entry"
                 .into(),
         );
     }
     Ok(FileIdentity {
-        dev,
-        ino,
+        volume: info.VolumeSerialNumber,
+        file_id: info.FileId.Identifier,
         is_dir: meta.is_dir(),
     })
 }
@@ -435,14 +463,13 @@ fn safe_metadata(path: &Path) -> Result<(PathBuf, fs::Metadata), String> {
 
 #[cfg(windows)]
 fn windows_path_safety(path: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileAttributesW, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
         FILE_ATTRIBUTE_REPARSE_POINT,
     };
 
     for ancestor in path.ancestors() {
-        let wide: Vec<u16> = ancestor.as_os_str().encode_wide().chain(Some(0)).collect();
+        let wide = windows_verbatim_wide(ancestor);
         let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
         if attributes == u32::MAX {
             return Err("file attributes are unavailable".into());
@@ -458,6 +485,36 @@ fn windows_path_safety(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(windows)]
+fn windows_verbatim_wide(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    // Verbatim Win32 paths do not normalize forward slashes, and lossy UTF-8
+    // conversion would change legal Windows filenames containing lone UTF-16
+    // surrogates. Preserve the OS string throughout.
+    let raw: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|c| if c == 47 { 92 } else { c })
+        .collect();
+    let mut verbatim = if raw.starts_with(&[92, 92, 63, 92]) {
+        raw
+    } else if raw.starts_with(&[92, 92]) {
+        r"\\?\UNC\"
+            .encode_utf16()
+            .chain(raw.into_iter().skip(2))
+            .collect()
+    } else {
+        r"\\?\".encode_utf16().chain(raw).collect()
+    };
+    verbatim.push(0);
+    verbatim
+}
+
+#[cfg(windows)]
+type SeenFiles = BTreeSet<(u64, [u8; 16])>;
+#[cfg(all(not(unix), not(windows)))]
+type SeenFiles = BTreeSet<PathBuf>;
 
 enum MeasurementCommandError {
     TimedOut,
@@ -649,7 +706,7 @@ fn logical_bytes_with_dedupe(
 #[cfg(not(unix))]
 fn logical_bytes_with_dedupe(
     path: &Path,
-    seen: &mut BTreeSet<PathBuf>,
+    seen: &mut SeenFiles,
     cancelled: &AtomicBool,
 ) -> Result<(u64, bool), String> {
     let mut pending = vec![path.to_path_buf()];
@@ -675,7 +732,17 @@ fn logical_bytes_with_dedupe(
             continue;
         }
         if meta.is_file() {
-            if seen.insert(current) {
+            #[cfg(windows)]
+            let key = match file_identity_from_path(&current, &meta) {
+                Ok(identity) => (identity.volume, identity.file_id),
+                Err(_) => {
+                    partial = true;
+                    continue;
+                }
+            };
+            #[cfg(not(windows))]
+            let key = current;
+            if seen.insert(key) {
                 bytes += meta.len();
             }
             continue;
@@ -711,7 +778,7 @@ fn assign_candidate_measurements(
     #[cfg(unix)]
     let mut seen = BTreeSet::<(u64, u64)>::new();
     #[cfg(not(unix))]
-    let mut seen = BTreeSet::<PathBuf>::new();
+    let mut seen = SeenFiles::new();
     for id in ids {
         let candidate = candidates.get_mut(&id).ok_or("candidate disappeared")?;
         let (bytes, was_partial) =
@@ -902,10 +969,7 @@ fn validate_candidate(candidate: &CandidateInternal, home: &Path) -> Result<(), 
         return Err("protected name".into());
     }
     let current = file_identity_from_path(&canonical, &meta)?;
-    if current.dev != candidate.identity.dev
-        || current.ino != candidate.identity.ino
-        || current.is_dir != candidate.identity.is_dir
-    {
+    if current != candidate.identity {
         return Err("file identity changed since scan".into());
     }
     Ok(())
@@ -1452,6 +1516,20 @@ fn clean_engine(
             }
             Ok(()) => {
                 let bytes = du_bytes(&path);
+                // Measurement can take long enough for a concurrent rename or
+                // replacement. Revalidate identity immediately before the
+                // only destructive operation (and before clearing read-only).
+                if let Err(detail) = validate_candidate(candidate, &state.home) {
+                    skipped.push(format!("{} — {detail}", path.display()));
+                    outcomes.push(CandidateOutcome {
+                        id: id.clone(),
+                        path: path.to_string_lossy().to_string(),
+                        status: "skipped".into(),
+                        detail,
+                        freed: 0,
+                    });
+                    continue;
+                }
                 let result = remove_authorized_candidate(&path, candidate.identity.is_dir);
                 match result {
                     Ok(()) => {
@@ -3138,6 +3216,124 @@ mod tests {
         remove_authorized_candidate(&candidate, false).unwrap();
         assert!(!candidate.exists());
         assert!(sibling.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_hardlinks_in_sibling_candidates_are_counted_once() {
+        let root = fixture();
+        let first = root.join("first-cache");
+        let second = root.join("second-cache");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("payload"), b"12345").unwrap();
+        fs::hard_link(first.join("payload"), second.join("payload")).unwrap();
+        let mut candidates = BTreeMap::new();
+        candidates.insert("first".into(), fixture_candidate(first, "pkg"));
+        candidates.insert("second".into(), fixture_candidate(second, "editors"));
+        assert!(!assign_candidate_measurements(&mut candidates, &AtomicBool::new(false)).unwrap());
+        assert_eq!(
+            candidates
+                .values()
+                .map(|candidate| candidate.size)
+                .sum::<u64>(),
+            5
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_locked_candidate_reports_an_error_without_touching_sibling() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = fixture();
+        let candidate = root.join("locked-cache");
+        let sibling = root.join("sibling");
+        fs::write(&candidate, b"cache").unwrap();
+        fs::write(&sibling, b"keep").unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&candidate)
+            .unwrap();
+        assert!(remove_authorized_candidate(&candidate, false).is_err());
+        assert!(sibling.exists());
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_ancestor_is_rejected_without_touching_its_target() {
+        let home = fixture();
+        let outside = fixture();
+        let link = home.join("linked-cache");
+        fs::write(outside.join("child"), b"keep").unwrap();
+        assert!(safe_metadata(&outside.join("child")).is_ok());
+        let created = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "junction fixture failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        assert!(safe_metadata(&link).is_err());
+        assert!(safe_metadata(&link.join("child")).is_err());
+        assert_eq!(fs::read(outside.join("child")).unwrap(), b"keep");
+        fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_cleanup_never_follows_a_junction_inside_an_owned_cache() {
+        let home = fixture();
+        let outside = fixture();
+        let cache = home.join("AppData/Local/npm-cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("cache-data"), b"cache").unwrap();
+        fs::write(outside.join("valuable"), b"keep").unwrap();
+        let link = cache.join("external");
+        let created = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "junction fixture failed: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let mut state = engine(&home);
+        let snapshot = scan_snapshot(&mut state, &[], Some(vec!["pkg".into()]));
+        let candidate = snapshot.categories[0].entries[0].id.clone();
+        let preflight = create_preflight(&mut state, snapshot.id, vec![candidate]).unwrap();
+        let result = clean_engine(&mut state, preflight.id, false).unwrap();
+        assert_eq!(result.deleted.len(), 1);
+        assert_eq!(fs::read(outside.join("valuable")).unwrap(), b"keep");
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_offline_attribute_is_rejected_when_supported_by_the_volume() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_OFFLINE};
+
+        let root = fixture();
+        let candidate = root.join("cloud-placeholder");
+        fs::write(&candidate, b"local").unwrap();
+        let wide: Vec<u16> = candidate.as_os_str().encode_wide().chain(Some(0)).collect();
+        if unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_OFFLINE) } != 0 {
+            assert!(windows_path_safety(&candidate).is_err());
+        } else {
+            eprintln!("SKIP: FILE_ATTRIBUTE_OFFLINE cannot be set on this fixture volume");
+        }
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
