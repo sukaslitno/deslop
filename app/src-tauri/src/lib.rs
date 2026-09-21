@@ -3293,7 +3293,10 @@ mod tests {
     fn windows_cleanup_never_follows_a_junction_inside_an_owned_cache() {
         let home = fixture();
         let outside = fixture();
-        let cache = home.join("AppData/Local/npm-cache");
+        // cmd's mklink interprets slash-delimited segments as switches. Build
+        // its fixture path with native separators; the application separately
+        // tests mixed-slash and verbatim Win32 paths.
+        let cache = home.join("AppData").join("Local").join("npm-cache");
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join("cache-data"), b"cache").unwrap();
         fs::write(outside.join("valuable"), b"keep").unwrap();
