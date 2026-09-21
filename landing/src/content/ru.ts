@@ -51,6 +51,7 @@ export const ru: LandingContent = {
     lineTwoBeforeOs: "Винда",
     lineTwoAfterOs: "позже",
     accessibleTitle: "Скачать на Мак. Винда — позже",
+    windowsReady: { lineTwoBeforeOs: "или", lineTwoAfterOs: "Винду", accessibleTitle: "Скачать на Мак или Винду" },
     download: "Скачать",
     aside: "... и еще чуть-чуть",
   },

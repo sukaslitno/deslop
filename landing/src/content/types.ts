@@ -35,6 +35,8 @@ export interface LandingContent {
     lineTwoBeforeOs: string;
     lineTwoAfterOs: string;
     accessibleTitle: string;
+    /** Replaces the second line once the Windows installer is published. */
+    windowsReady: { lineTwoBeforeOs: string; lineTwoAfterOs: string; accessibleTitle: string };
     download: string;
     aside: string;
   };

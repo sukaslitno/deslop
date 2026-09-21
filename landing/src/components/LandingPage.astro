@@ -16,6 +16,8 @@ const mobileAsset = (file: string) => `${site.assetOrigin}/landing-v2/mobile/${f
 const localePath = locale === "ru" ? "/en/" : "/";
 const fixtureReleases = fixtureName && fixtureName in releaseFixtures ? releaseFixtures[fixtureName as keyof typeof releaseFixtures] : releases;
 const { macReleases, windowsReleases, macAvailable, windowsAvailable, macOption, windowsOption } = getDownloadAvailability(fixtureReleases);
+// The headline only distinguishes the two states that can ship: Mac-only and both.
+const cta = windowsAvailable ? { ...content.cta, ...content.cta.windowsReady } : content.cta;
 const socialLinks = [
   { key: "github", label: content.links.github, icon: "cta-imgIc16Github.svg", href: site.github },
   { key: "donate", label: content.links.donate, icon: "cta-imgIc16Donate.svg", href: site.donate },
@@ -68,9 +70,9 @@ const socialLinks = [
   </section>
 
   <section class="cta-section" aria-labelledby="cta-title">
-    <h2 id="cta-title" aria-label={content.cta.accessibleTitle}><span><span class="cta-copy">{content.cta.lineOneBeforeOs}</span><picture class="os-logo os-logo--apple"><source media="(max-width: 767px)" srcset={mobileAsset("cta-apple.svg")} /><img src={asset("cta-imgFrame.svg")} alt="" width="42" height="42" /></picture><span class="cta-copy">{content.cta.lineOneAfterOs}</span></span><span><span class="cta-copy">{content.cta.lineTwoBeforeOs}</span><picture class="os-logo os-logo--windows"><source media="(max-width: 767px)" srcset={mobileAsset("cta-windows.svg")} /><img src={asset("cta-imgFrame1.svg")} alt="" width="52" height="52" /></picture><span class="cta-copy">{content.cta.lineTwoAfterOs}</span></span></h2>
-    <a class="giant-download vc-corner-smooth" href="#download-options" data-download-trigger><span class="giant-download-icon"><picture class="giant-download-icon__dark"><source media="(max-width: 767px)" srcset={mobileAsset("cta-download.svg")} /><img src={asset("cta-imgDownloadIcon.svg")} alt="" width="64" height="64" /></picture><img class="giant-download-icon__light" src={asset("hero-imgIc16Download1.svg")} alt="" width="64" height="64" /></span><span>{content.cta.download}</span></a>
-    <p class="cta-section__aside">{content.cta.aside}</p>
+    <h2 id="cta-title" aria-label={cta.accessibleTitle}><span><span class="cta-copy">{cta.lineOneBeforeOs}</span><picture class="os-logo os-logo--apple"><source media="(max-width: 767px)" srcset={mobileAsset("cta-apple.svg")} /><img src={asset("cta-imgFrame.svg")} alt="" width="42" height="42" /></picture><span class="cta-copy">{cta.lineOneAfterOs}</span></span><span><span class="cta-copy">{cta.lineTwoBeforeOs}</span><picture class="os-logo os-logo--windows"><source media="(max-width: 767px)" srcset={mobileAsset("cta-windows.svg")} /><img src={asset("cta-imgFrame1.svg")} alt="" width="52" height="52" /></picture><span class="cta-copy">{cta.lineTwoAfterOs}</span></span></h2>
+    <a class="giant-download vc-corner-smooth" href="#download-options" data-download-trigger><span class="giant-download-icon"><picture class="giant-download-icon__dark"><source media="(max-width: 767px)" srcset={mobileAsset("cta-download.svg")} /><img src={asset("cta-imgDownloadIcon.svg")} alt="" width="64" height="64" /></picture><img class="giant-download-icon__light" src={asset("hero-imgIc16Download1.svg")} alt="" width="64" height="64" /></span><span>{cta.download}</span></a>
+    <p class="cta-section__aside">{cta.aside}</p>
     <nav class="social-links" aria-label={locale === "ru" ? "Сообщество" : "Community"}>
       {socialLinks.map((link) => link.href ? <a class:list={["social-link", `social-link--${link.key}`, "vc-corner-smooth"]} href={link.href} target="_blank" rel="noopener noreferrer"><img src={asset(link.icon)} alt="" width="16" height="16" />{link.label}</a> : <button class:list={["social-link", `social-link--${link.key}`, "is-unavailable", "vc-corner-smooth"]} type="button" disabled><img src={asset(link.icon)} alt="" width="16" height="16" />{link.label}<span class="sr-only">: {content.links.unavailable}</span></button>)}
     </nav>

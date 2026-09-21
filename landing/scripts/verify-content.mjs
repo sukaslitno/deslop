@@ -17,7 +17,7 @@ for (const fragment of ["Не копи шлоп,", "управляй", "шлоп
 for (const key of ["github", "releases", "telegram", "betaChat", "donate", "author"]) if (!site.includes(`${key}:`)) throw new Error(`site config is missing ${key}`);
 if (!site.includes("https://github.com/sukaslitno/verbaclean")) throw new Error("GitHub target does not match the confirmed repository");
 if (!site.includes("donate: null") || !site.includes("author: null")) throw new Error("Unavailable donate/author URLs must remain explicit");
-for (const asset of ["Deslop_0.1.1_aarch64.dmg", "Deslop_0.1.1_x64.dmg"]) if (!releases.includes(asset)) throw new Error(`Verified macOS asset is missing: ${asset}`);
-if (releases.includes('platform: "windows"')) throw new Error("Windows installer must not be invented without a verified release asset");
+for (const asset of ["Deslop_0.1.2_aarch64.dmg", "Deslop_0.1.2_x64.dmg", "Deslop_0.1.2_x64-setup.exe"]) if (!releases.includes(`releases/download/v0.1.2/${asset}`)) throw new Error(`Published v0.1.2 installer is missing: ${asset}`);
+if (releases.includes("0.1.1")) throw new Error("Superseded v0.1.1 installers must not stay in the mapping");
 
 console.log("Content, links, and verified installer availability match the v2 contract.");

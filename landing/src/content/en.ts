@@ -51,6 +51,7 @@ export const en: LandingContent = {
     lineTwoBeforeOs: "Windows",
     lineTwoAfterOs: "later",
     accessibleTitle: "Download for Mac. Windows later",
+    windowsReady: { lineTwoBeforeOs: "or", lineTwoAfterOs: "Windows", accessibleTitle: "Download for Mac or Windows" },
     download: "Download",
     aside: "... and a little more",
   },

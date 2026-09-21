@@ -1,0 +1,22 @@
+---
+import LandingLayout from "../../../../layouts/LandingLayout.astro";
+import LandingPage from "../../../../components/LandingPage.astro";
+import { releaseFixtures } from "../../../../config/releaseAvailability";
+import { ru } from "../../../../content/ru";
+import { en } from "../../../../content/en";
+
+// Static route parameters work in Astro dev without enabling server rendering.
+// No fixture pages are generated or published by a production build.
+export function getStaticPaths() {
+  return import.meta.env.DEV
+    ? ["ru", "en"].flatMap((locale) => Object.keys(releaseFixtures).map((fixture) => ({ params: { locale, fixture } })))
+    : [];
+}
+
+const locale = Astro.params.locale === "en" ? "en" : "ru";
+const content = locale === "en" ? en : ru;
+---
+
+<LandingLayout lang={locale} title={content.meta.title} description={content.meta.description} canonicalPath={locale === "en" ? "/en/" : "/"}>
+  <LandingPage content={content} locale={locale} fixtureName={Astro.params.fixture} />
+</LandingLayout>

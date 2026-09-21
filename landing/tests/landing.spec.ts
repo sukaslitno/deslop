@@ -90,11 +90,11 @@ test("one dialog serves all three triggers and restores focus and scroll", async
   for (let index = 0; index < 4; index += 1) {
     await page.keyboard.press("Tab");
     expect(await page.locator("[data-download-dialog]").evaluate((element) => element.contains(document.activeElement))).toBe(true);
-    focusSequence.push(await page.evaluate(() => document.activeElement?.matches("[data-download-close]") ? "close" : document.activeElement?.matches("summary") ? "os" : document.activeElement?.matches(".download-dialog__notice a") ? "releases" : document.activeElement?.tagName ?? "none"));
+    focusSequence.push(await page.evaluate(() => document.activeElement?.matches("[data-download-close]") ? "close" : document.activeElement?.matches("summary") ? "os" : document.activeElement?.matches("[data-download-platform='windows']") ? "windows" : document.activeElement?.tagName ?? "none"));
   }
-  expect(focusSequence).toEqual(["close", "os", "releases", "close"]);
+  expect(focusSequence).toEqual(["close", "os", "windows", "close"]);
   await page.keyboard.press("Shift+Tab");
-  await expect(page.locator(".download-dialog__notice a")).toBeFocused();
+  await expect(page.locator("[data-download-platform='windows']")).toBeFocused();
   const panelBox = await page.locator(".download-dialog__inner").boundingBox();
   if (!panelBox) throw new Error("dialog panel is missing");
   await page.mouse.click(panelBox.x + 10, panelBox.y + panelBox.height / 2);
@@ -126,11 +126,14 @@ test("has an honest OS mapping without starting a real download", async ({ page 
   const mac = page.locator("[data-download-platform='macos']");
   await expect(mac).toHaveCount(2);
   await expect(mac.nth(0)).toHaveAttribute("data-download-architecture", "apple-silicon");
-  await expect(mac.nth(0)).toHaveAttribute("href", /Deslop_0\.1\.1_aarch64\.dmg$/);
+  await expect(mac.nth(0)).toHaveAttribute("href", /Deslop_0\.1\.2_aarch64\.dmg$/);
   await expect(mac.nth(1)).toHaveAttribute("data-download-architecture", "intel");
-  await expect(mac.nth(1)).toHaveAttribute("href", /Deslop_0\.1\.1_x64\.dmg$/);
-  await expect(page.locator("[data-download-platform='windows']")).toBeDisabled();
-  await expect(page.locator(".download-dialog__notice")).toContainText(/Установщики появятся позже/);
+  await expect(mac.nth(1)).toHaveAttribute("href", /Deslop_0\.1\.2_x64\.dmg$/);
+  const windows = page.locator("[data-download-platform='windows']");
+  await expect(windows).toHaveAttribute("data-download-architecture", "x64");
+  await expect(windows).toHaveAttribute("href", /Deslop_0\.1\.2_x64-setup\.exe$/);
+  await expect(page.locator(".download-dialog__notice")).toHaveCount(0);
+  await expect(page.locator("#cta-title")).toHaveAttribute("aria-label", "Скачать на Мак или Винду");
 });
 
 test("models both, none, Mac-only, and Windows-only installer fixtures without inventing URLs", () => {

@@ -8,24 +8,33 @@ export interface Release {
 }
 
 /**
- * Populated only from the verified GitHub v0.1.1 release. It intentionally
- * contains no Windows entry: that asset has not been published.
+ * Populated only from the published GitHub v0.1.2 release, whose four assets
+ * were downloaded and checked before this mapping was enabled. The Windows
+ * installer is a preview build; its .exe is not covered by checksums.txt.
  */
 export const releases: Release[] = [
   {
     platform: "macos",
     architecture: "apple-silicon",
-    version: "0.1.1",
-    filename: "Deslop_0.1.1_aarch64.dmg",
-    url: "https://github.com/sukaslitno/deslop/releases/download/v0.1.1/Deslop_0.1.1_aarch64.dmg",
+    version: "0.1.2",
+    filename: "Deslop_0.1.2_aarch64.dmg",
+    url: "https://github.com/sukaslitno/deslop/releases/download/v0.1.2/Deslop_0.1.2_aarch64.dmg",
     available: true,
   },
   {
     platform: "macos",
     architecture: "intel",
-    version: "0.1.1",
-    filename: "Deslop_0.1.1_x64.dmg",
-    url: "https://github.com/sukaslitno/deslop/releases/download/v0.1.1/Deslop_0.1.1_x64.dmg",
+    version: "0.1.2",
+    filename: "Deslop_0.1.2_x64.dmg",
+    url: "https://github.com/sukaslitno/deslop/releases/download/v0.1.2/Deslop_0.1.2_x64.dmg",
+    available: true,
+  },
+  {
+    platform: "windows",
+    architecture: "x64",
+    version: "0.1.2",
+    filename: "Deslop_0.1.2_x64-setup.exe",
+    url: "https://github.com/sukaslitno/deslop/releases/download/v0.1.2/Deslop_0.1.2_x64-setup.exe",
     available: true,
   },
 ];
