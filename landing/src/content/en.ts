@@ -3,7 +3,7 @@ import type { LandingContent } from "./types";
 export const en: LandingContent = {
   meta: {
     title: "Deslop — cache cleanup and disk map",
-    description: "Finds cache slop, maps your drive, and cleans caches on a schedule.",
+    description: "Finds cache slop, maps your drive, and helps remove selected caches.",
   },
   header: { locale: "EN", localeLabel: "Choose language", switchTo: "RU", download: "Download" },
   hero: {
@@ -11,7 +11,7 @@ export const en: LandingContent = {
     lineTwoBeforeDisk: "take charge of",
     lineTwoAfterDisk: "storage",
     accessibleTitle: "Don’t hoard slop, take charge of storage",
-    subtitle: "Finds cache slop, maps your drive\nand cleans caches on a schedule",
+    subtitle: "Finds cache slop, maps your drive\nand helps remove selected caches",
     download: "Download",
     github: "GitHub",
   },
@@ -37,7 +37,7 @@ export const en: LandingContent = {
     cards: [
       { title: "Cleanup", description: "Sorts slop by category. You pick what goes", icon: "features-imgFeatureIcon.svg" },
       { title: "Map", description: "Shows the biggest culprits. Deletes nothing", icon: "features-imgFeatureIcon1.svg" },
-      { title: "Automations", description: "Cleans selected caches on a schedule. Sessions and projects stay out", icon: "features-imgFeatureIcon2.svg" },
+      { title: "Automations", description: "Scheduled cleanup is in development", icon: "features-imgFeatureIcon2.svg" },
     ],
   },
   screen: {

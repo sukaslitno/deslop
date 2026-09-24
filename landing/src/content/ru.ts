@@ -3,7 +3,7 @@ import type { LandingContent } from "./types";
 export const ru: LandingContent = {
   meta: {
     title: "Deslop — очистка кэшей и карта диска",
-    description: "Находит шлоп в кэшах, показывает карту диска и чистит выбранное по расписанию.",
+    description: "Находит шлоп в кэшах, показывает карту диска и помогает удалить выбранное.",
   },
   header: { locale: "RU", localeLabel: "Выбрать язык", switchTo: "EN", download: "Скачать" },
   hero: {
@@ -11,7 +11,7 @@ export const ru: LandingContent = {
     lineTwoBeforeDisk: "управляй",
     lineTwoAfterDisk: "хранилищем",
     accessibleTitle: "Не копи шлоп, управляй хранилищем",
-    subtitle: "Находит шлоп, показывает карту диска\nи чистит кэши по расписанию",
+    subtitle: "Находит шлоп, показывает карту диска\nи помогает очистить выбранные кэши",
     download: "Скачать",
     github: "GitHub",
   },
@@ -37,7 +37,7 @@ export const ru: LandingContent = {
     cards: [
       { title: "Очистка", description: "Разбирает шлоп по категориям. Лишнее выбираете сами", icon: "features-imgFeatureIcon.svg" },
       { title: "Карта", description: "Показывает крупных виновников. Ничего не удаляет", icon: "features-imgFeatureIcon1.svg" },
-      { title: "Автоматизации", description: "По расписанию чистит кэши. Сессии и проекты — мимо", icon: "features-imgFeatureIcon2.svg" },
+      { title: "Автоматизации", description: "Очистка по расписанию — в разработке", icon: "features-imgFeatureIcon2.svg" },
     ],
   },
   screen: {

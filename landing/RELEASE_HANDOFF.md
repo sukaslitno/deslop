@@ -22,7 +22,7 @@ unavailable platform; a missing Windows asset does not disable macOS. Platforms
 can be enabled independently when only some artifacts are ready.
 
 There is no checksum surface on the landing: the release manifest
-(`checksums.txt`) covers the macOS disk images only and is reached through the
+(`checksums.txt`) covers all three published installers and is reached through the
 GitHub release page. Do not add a checksum link that synthesizes a URL or digest.
 
 `tests/releases.spec.ts` checks the committed mapping: unique platform/architecture

@@ -15,7 +15,7 @@ for (const [name, source] of [["ru", ru], ["en", en]]) {
 }
 for (const fragment of ["Не копи шлоп,", "управляй", "шлоп", "(и бесплатно!)", "тут на мобиле", "видно вообще что-то?", "А зачем качать с мобилы?", "Я хз... хочу так", "Не, ну если СИЛЬНО надо...", "Какая у вас система?", "Винда", "2026. jeneverbes"]) if (!ru.includes(fragment)) throw new Error(`Required RU copy is missing: ${fragment}`);
 for (const key of ["github", "releases", "telegram", "betaChat", "donate", "author"]) if (!site.includes(`${key}:`)) throw new Error(`site config is missing ${key}`);
-if (!site.includes("https://github.com/sukaslitno/verbaclean")) throw new Error("GitHub target does not match the confirmed repository");
+if (!site.includes("https://github.com/sukaslitno/deslop")) throw new Error("GitHub target does not match the confirmed repository");
 if (!site.includes("donate: null") || !site.includes("author: null")) throw new Error("Unavailable donate/author URLs must remain explicit");
 for (const asset of ["Deslop_0.1.2_aarch64.dmg", "Deslop_0.1.2_x64.dmg", "Deslop_0.1.2_x64-setup.exe"]) if (!releases.includes(`releases/download/v0.1.2/${asset}`)) throw new Error(`Published v0.1.2 installer is missing: ${asset}`);
 if (releases.includes("0.1.1")) throw new Error("Superseded v0.1.1 installers must not stay in the mapping");

@@ -10,7 +10,7 @@ export interface Release {
 /**
  * Populated only from the published GitHub v0.1.2 release, whose four assets
  * were downloaded and checked before this mapping was enabled. The Windows
- * installer is a preview build; its .exe is not covered by checksums.txt.
+ * installer is a preview build; checksums.txt covers all three installers.
  */
 export const releases: Release[] = [
   {
