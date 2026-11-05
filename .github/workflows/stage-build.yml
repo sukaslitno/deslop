@@ -1,0 +1,51 @@
+name: Stage build (Apple Silicon)
+
+on:
+  push:
+    branches: [stage]
+  workflow_dispatch:
+
+concurrency:
+  group: stage-build
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Install Rust target
+        run: rustup toolchain install 1.88.0 --profile minimal --target aarch64-apple-darwin
+      - name: Rust tests (result is informational)
+        id: rust_tests
+        continue-on-error: true
+        working-directory: app/src-tauri
+        run: cargo test --locked
+      - name: Build DMG
+        working-directory: app
+        run: pnpm tauri build --bundles dmg --target aarch64-apple-darwin
+      - name: Publish to the stage prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TESTS: ${{ steps.rust_tests.outcome }}
+        run: |
+          DMG=$(ls app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+          NOTES="Commit ${GITHUB_SHA::7}. Rust tests: ${TESTS}. Unsigned test build."
+          gh release view stage >/dev/null 2>&1 || gh release create stage --prerelease --title "Deslop stage" --notes "$NOTES" --target "$GITHUB_SHA"
+          gh release edit stage --notes "$NOTES"
+          gh release upload stage "$DMG" --clobber
