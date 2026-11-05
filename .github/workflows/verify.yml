@@ -2,7 +2,7 @@ name: Verify Deslop
 
 on:
   push:
-    branches: ["**"]
+    branches: ["**", "!stage"]
   pull_request:
 
 jobs:
