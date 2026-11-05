@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 // Pending Figma export: no local equivalent for the preflight shield yet (see DESIGN_AUDIT_PLAN 5.1).
 import { SafeShield2Line } from "@mingcute/react";
 import diskIcon from "@/assets/storage-drive-3d-256.png";
@@ -8,6 +9,7 @@ import warningHex from "@/assets/figma/warning-hex.svg?no-inline";
 import {
   api,
   type Category,
+  type CleanupExclusion,
   type DiskInfo,
   type Preflight,
   type ScanJobStatus,
@@ -70,6 +72,7 @@ const STORAGE_CATEGORY_META: Record<CleanupCategoryId, { token: string }> = {
   packageCaches: { token: "bg-[var(--vc-color-orange)]" },
   developerCaches: { token: "bg-[var(--vc-color-green)]" },
   modelCaches: { token: "bg-[var(--vc-color-dark-aqua)]" },
+  projectArtifacts: { token: "bg-[var(--vc-color-purple)]" },
 };
 
 const RULE_TITLE_KEYS = {
@@ -252,6 +255,7 @@ type CleanupResultsWorkspaceProps = {
   onRequestClean: (ids: string[]) => void;
   onRetryCleanRefresh: () => void;
   onScan: () => void;
+  onScanProjects: () => void;
   onToggleCategory: (category: Category) => void;
   onToggleEntry: (id: string) => void;
   onToggleExpand: (id: string) => void;
@@ -281,6 +285,7 @@ function CleanupResultsWorkspace({
   onRequestClean,
   onRetryCleanRefresh,
   onScan,
+  onScanProjects,
   onToggleCategory,
   onToggleEntry,
   onToggleExpand,
@@ -319,6 +324,7 @@ function CleanupResultsWorkspace({
     { categoryId: "packageCaches", label: t("packageCaches"), tone: "blue" },
     { categoryId: "developerCaches", label: t("developerCaches"), tone: "green" },
     { categoryId: "modelCaches", label: t("modelCaches"), tone: "darkAqua" },
+    { categoryId: "projectArtifacts", label: t("projectArtifacts"), tone: "purple" },
   ];
   const segments = legendDefinitions.flatMap((definition) => {
     const bytes = breakdownById.get(definition.categoryId) ?? 0;
@@ -371,6 +377,13 @@ function CleanupResultsWorkspace({
             usedLabel={capacity > 0 ? diskLabel(used) : "—"}
             usedPercentage={neutralUsedPercentage}
           />
+
+          <section className="vc-corner-smooth flex flex-wrap items-center justify-between gap-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-16)]">
+            <p className="min-w-0 flex-1 text-style-caption text-[var(--vc-text-secondary)]">{t("projectRootsHelp")}</p>
+            <Button disabled={cleaning || scanning || preflighting} icon="folder" onClick={onScanProjects} variant="gray">
+              {t("selectProjectRoots")}
+            </Button>
+          </section>
 
           {initializing ? <LoadingState message={t("preparing")} /> : null}
           {scanCta.location === "center" ? <EmptyState action={scanCta.label} onScan={onScan} /> : null}
@@ -457,9 +470,10 @@ function CleanupResultSummary({
   onRetryRefresh: () => void;
 }) {
   const { t } = useLocale();
-  const skippedOrFailed = result.outcomes.filter((outcome) => outcome.status !== "deleted");
-  const hasIssues = result.skipped.length > 0 || result.errors.length > 0 || Boolean(result.record_error);
-  const title = hasIssues ? t("cleanupFinishedWithIssues") : result.deleted.length ? t("cleanupFinished") : t("nothingRemoved");
+  const successful = result.outcomes.filter((outcome) => outcome.status === "deleted" || outcome.status === "completed");
+  const skippedOrFailed = result.outcomes.filter((outcome) => outcome.status !== "deleted" && outcome.status !== "completed");
+  const hasIssues = skippedOrFailed.length > 0 || Boolean(result.record_error);
+  const title = hasIssues ? t("cleanupFinishedWithIssues") : successful.length ? t("cleanupFinished") : t("nothingRemoved");
   return (
     <section
       aria-live="polite"
@@ -476,6 +490,7 @@ function CleanupResultSummary({
               bytes: human(result.freed),
             })}
           </p>
+          {successful.some((outcome) => outcome.status === "completed") ? <p className="mt-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">{t("operationCompleted", { count: successful.filter((outcome) => outcome.status === "completed").length })}</p> : null}
         </div>
         {cleanRefreshFailed ? <Button icon="refresh" onClick={onRetryRefresh} variant="gray">{t("retryRefresh")}</Button> : null}
       </div>
@@ -778,6 +793,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
   const [cleaning, setCleaning] = useState(false);
   const [snapshotId, setSnapshotId] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
+  const [exclusions, setExclusions] = useState<CleanupExclusion[]>([]);
   const [cleanResult, setCleanResult] = useState<CleanResult | null>(null);
   const [cleanRefreshFailed, setCleanRefreshFailed] = useState(false);
   const [error, setError] = useState<string>("");
@@ -812,7 +828,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
       : new Set<string>();
   }
 
-  async function runScan(): Promise<boolean> {
+  async function runScan(scanRoots?: string[], only?: string[]): Promise<boolean> {
     // Claim synchronously so double activation during `defaultRoots` cannot
     // produce concurrent jobs.
     if (scanInFlight.current) return false;
@@ -821,9 +837,9 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
     setError("");
     setScanError("");
     try {
-      const r = roots.length ? roots : await api.defaultRoots();
-      if (!roots.length) setRoots(r);
-      const [d, started] = await Promise.all([api.diskInfo(), api.startScan(r)]);
+      const r = scanRoots ?? (roots.length ? roots : await api.defaultRoots());
+      if (!scanRoots && !roots.length) setRoots(r);
+      const [d, started] = await Promise.all([api.diskInfo(), api.startScan(r, only)]);
       setDisk(d);
       setScanJob(started);
       let job = started;
@@ -869,6 +885,10 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
     return () => {
       mounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    void api.cleanupExclusions().then(setExclusions).catch(() => undefined);
   }, []);
 
   const selectable = useMemo(() => cats.flatMap((c) => c.tier === "RED" ? [] : c.entries), [cats]);
@@ -926,6 +946,40 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
       setError(String(e));
     } finally {
       setPreflighting(false);
+    }
+  }
+
+  async function scanProjects() {
+    const chosen = await open({ directory: true, multiple: true, title: t("selectProjectRoots") });
+    const selectedRoots = Array.isArray(chosen) ? chosen : chosen ? [chosen] : [];
+    if (!selectedRoots.length) return;
+    await runScan(selectedRoots, ["project"]);
+  }
+
+  async function excludeFromPreflight(entry: Preflight["entries"][number]) {
+    if (!preflight) return;
+    try {
+      setExclusions(await api.addCleanupExclusion(preflight.snapshot_id, entry.id));
+      setSelected((previous) => {
+        const next = new Set(previous);
+        next.delete(entry.id);
+        return next;
+      });
+      setPreflight(null);
+      toast(t("excludeFromCleanup"), "success");
+    } catch (reason) {
+      setError(String(reason));
+      toast(String(reason), "danger");
+    }
+  }
+
+  async function removeExclusion(id: string) {
+    try {
+      setExclusions(await api.removeCleanupExclusion(id));
+      toast(t("removeExclusion"), "success");
+    } catch (reason) {
+      setError(String(reason));
+      toast(String(reason), "danger");
     }
   }
   async function confirmClean() {
@@ -1046,7 +1100,10 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
             onOpenSettings={openSettings}
             onRequestClean={requestClean}
             onRetryCleanRefresh={() => void runScan().then((refreshed) => setCleanRefreshFailed(!refreshed))}
-            onScan={runScan}
+            // Button callbacks receive a MouseEvent. Keep that event out of
+            // the backend scan contract, which accepts only validated paths.
+            onScan={() => void runScan()}
+            onScanProjects={() => void scanProjects()}
             onToggleCategory={toggleCategory}
             onToggleEntry={toggleEntry}
             onToggleExpand={toggleExpand}
@@ -1076,6 +1133,8 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
         ) : view === "settings" ? (
           <SettingsView
             onBack={closeSettings}
+            exclusions={exclusions}
+            onRemoveExclusion={(id) => void removeExclusion(id)}
             onPreferencesUpdate={applyPreferences}
             preferences={preferences}
           />
@@ -1111,6 +1170,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
           cleaning={cleaning}
           returnFocus={preflightInitiator.current}
           onCancel={() => setPreflight(null)}
+          onExclude={excludeFromPreflight}
           onConfirm={confirmClean}
         />
       )}
@@ -1217,10 +1277,14 @@ function MapView({
 
 function SettingsView({
   onBack,
+  exclusions,
+  onRemoveExclusion,
   preferences,
   onPreferencesUpdate,
 }: {
   onBack: () => void;
+  exclusions: CleanupExclusion[];
+  onRemoveExclusion: (id: string) => void;
   preferences: AppPreferences;
   onPreferencesUpdate: (patch: AppPreferencesPatch) => Promise<void>;
 }) {
@@ -1249,7 +1313,7 @@ function SettingsView({
         <h1 className="text-style-heading font-medium tracking-[-0.02em]">{t("settings")}</h1>
       </header>
 
-      <section className="vc-corner-smooth absolute left-[var(--vc-gap-32)] right-[var(--vc-gap-32)] top-[calc(var(--vc-gap-64)+var(--vc-gap-32)+var(--vc-gap-8))] flex flex-col gap-[var(--vc-gap-24)] overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-24)]">
+      <section className="vc-corner-smooth absolute bottom-[var(--vc-gap-32)] left-[var(--vc-gap-32)] right-[var(--vc-gap-32)] top-[calc(var(--vc-gap-64)+var(--vc-gap-32)+var(--vc-gap-8))] flex flex-col gap-[var(--vc-gap-24)] overflow-y-auto rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-24)]">
         <section className="flex flex-col gap-[var(--vc-gap-16)]" aria-labelledby="settings-general-title">
           <h2 className="text-style-body font-medium tracking-[-0.02em]" id="settings-general-title">{t("settingsGeneral")}</h2>
           <div className="vc-corner-smooth flex items-center justify-between gap-[var(--vc-gap-16)] overflow-hidden rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-16)]">
@@ -1259,6 +1323,20 @@ function SettingsView({
               <ButtonSmall active={preferences.locale === "en"} onClick={() => void onPreferencesUpdate({ locale: "en" })}>EN</ButtonSmall>
             </div>
           </div>
+        </section>
+
+        <section className="flex flex-col gap-[var(--vc-gap-16)]" aria-labelledby="settings-exclusions-title">
+          <h2 className="text-style-body font-medium tracking-[-0.02em]" id="settings-exclusions-title">{t("exclusions")}</h2>
+          {exclusions.length ? (
+            <ul className="flex flex-col gap-[var(--vc-gap-8)]">
+              {exclusions.map((exclusion) => (
+                <li className="vc-corner-smooth flex min-w-0 items-center justify-between gap-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-16)]" key={exclusion.id}>
+                  <span className="min-w-0 truncate text-style-caption text-[var(--vc-text-secondary)]" title={exclusion.path}>{exclusion.path}</span>
+                  <Button icon="x" onClick={() => onRemoveExclusion(exclusion.id)} variant="gray">{t("removeExclusion")}</Button>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="text-style-caption text-[var(--vc-text-secondary)]">{t("noExclusions")}</p>}
         </section>
 
         <section className="flex flex-col gap-[var(--vc-gap-16)]" aria-labelledby="settings-about-title">
@@ -1536,12 +1614,14 @@ function PreflightDialog({
   cleaning,
   onCancel,
   onConfirm,
+  onExclude,
   returnFocus,
 }: {
   preflight: Preflight;
   cleaning: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  onExclude: (entry: Preflight["entries"][number]) => void;
   returnFocus: HTMLElement | null;
 }) {
   const { t } = useLocale();
@@ -1549,6 +1629,8 @@ function PreflightDialog({
   const returnFocusRef = useRef<HTMLElement | null>(returnFocus);
   const cleaningRef = useRef(cleaning);
   const onCancelRef = useRef(onCancel);
+  const canConfirm = preflight.entries.length > 0;
+  const blockedEntries = preflight.blocked_entries ?? [];
 
   useEffect(() => {
     cleaningRef.current = cleaning;
@@ -1560,9 +1642,9 @@ function PreflightDialog({
     const dialog = dialogRef.current;
     const focusable = () => dialog
       ? [...dialog.querySelectorAll<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")]
-        .filter((element) => !element.hasAttribute("hidden"))
+        .filter((element) => !element.hasAttribute("hidden") && element.tabIndex >= 0)
       : [];
-    const initial = focusable()[0] ?? dialog;
+    const initial = dialog?.querySelector<HTMLElement>("[data-preflight-cancel]") ?? focusable()[0] ?? dialog;
     initial?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -1626,17 +1708,28 @@ function PreflightDialog({
             {t("runningAppsDetail", { apps: preflight.running_apps.join(", ") })}
           </div>
         )}
+        {blockedEntries.length > 0 && (
+          <section className="vc-corner-smooth mt-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-warning-foreground)] p-[var(--vc-gap-16)]">
+            <h3 className="text-style-body-small font-medium tracking-[-0.02em]">{t("excludedEntries")}</h3>
+            <ul className="mt-[var(--vc-gap-8)] space-y-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">
+              {blockedEntries.map((entry) => <li key={entry.id} title={entry.path}>{cacheLeaf(entry.path)}: {entry.detail}</li>)}
+            </ul>
+          </section>
+        )}
+        {!canConfirm ? <p className="mt-[var(--vc-gap-16)] text-style-caption text-[var(--vc-text-secondary)]">{t("noSafeEntries")}</p> : null}
         <ul className="mt-4 max-h-48 space-y-2 overflow-y-auto text-style-caption">
           {preflight.entries.map((entry) => (
-            <li key={entry.id} className="rounded-md bg-muted/60 px-3 py-2">
+            <li key={entry.id} className="vc-corner-smooth rounded-[var(--vc-radius-8)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-8)]">
               <div className="flex justify-between gap-3"><code className="min-w-0 truncate font-mono" title={entry.path}>{entry.path}</code><span className="shrink-0">{human(entry.size)}</span></div>
+              <p className="mt-[var(--vc-gap-4)] text-[var(--vc-text-secondary)]">{entry.scope}</p>
               {entry.restore && <p className="text-muted-foreground mt-1">{t("restore", { value: entry.restore })}</p>}
+              <button className="mt-[var(--vc-gap-8)] text-style-caption text-[var(--vc-text-secondary)] underline outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" disabled={cleaning} onClick={() => onExclude(entry)} tabIndex={-1} type="button">{t("excludeFromCleanup")}</button>
             </li>
           ))}
         </ul>
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="gray" onClick={onCancel} disabled={cleaning}>{t("cancel")}</Button>
-          <Button disabled={cleaning} icon={cleaning ? undefined : "delete"} onClick={onConfirm} variant="destructive">
+          <Button data-preflight-cancel variant="gray" onClick={onCancel} disabled={cleaning}>{canConfirm ? t("cancel") : t("doNotClean")}</Button>
+          <Button disabled={cleaning || !canConfirm} icon={cleaning ? undefined : "delete"} onClick={onConfirm} variant="destructive">
             {cleaning ? <OrbitingCircles size={16} /> : null}
             {cleaning ? t("cleaning") : preflight.requires_yellow_confirmation ? t("confirmClean") : t("cleanEntries")}
           </Button>

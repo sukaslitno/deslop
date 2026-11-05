@@ -6,7 +6,9 @@ export interface Entry {
   id: string;
   path: string;
   size: number;
+  size_known: boolean;
   reason: string;
+  scope: string;
   restore: string | null;
 }
 
@@ -34,7 +36,8 @@ export type CleanupCategoryId =
   | "applicationCaches"
   | "packageCaches"
   | "developerCaches"
-  | "modelCaches";
+  | "modelCaches"
+  | "projectArtifacts";
 
 export interface CleanupBreakdownCategory {
   categoryId: CleanupCategoryId;
@@ -82,13 +85,22 @@ export interface Preflight {
   yellow_count: number;
   warnings: string[];
   running_apps: string[];
+  blocked_entries: Admission[];
   requires_yellow_confirmation: boolean;
+}
+
+export interface Admission {
+  id: string;
+  path: string;
+  state: "allowed" | "busy" | "unknown" | "protected";
+  reason_code: string;
+  detail: string;
 }
 
 export interface CandidateOutcome {
   id: string;
   path: string;
-  status: "deleted" | "skipped" | "error";
+  status: "deleted" | "completed" | "skipped" | "error" | "unknown";
   detail: string;
   freed: number;
 }
@@ -114,12 +126,23 @@ export interface RunRecord {
   id: string;
   schema_version: number;
   policy_fingerprint: string;
+  started_at: number;
   completed_at: number;
+  status: "completed" | "interrupted" | "running";
   freed: number;
+  freed_size_unknown: boolean;
   deleted: number;
   skipped: number;
   errors: number;
   outcomes: CandidateOutcome[];
+}
+
+export interface CleanupExclusion {
+  id: string;
+  ruleId: string;
+  owner: string;
+  path: string;
+  createdAt: number;
 }
 
 export interface MapNode {
@@ -208,6 +231,11 @@ export const api = {
   clean: (preflightId: string, confirmYellow: boolean) =>
     invoke<CleanResult>("clean", { preflightId, confirmYellow }),
   runHistory: () => invoke<RunRecord[]>("run_history"),
+  cleanupExclusions: () => invoke<CleanupExclusion[]>("cleanup_exclusions"),
+  addCleanupExclusion: (snapshotId: string, candidateId: string) =>
+    invoke<CleanupExclusion[]>("add_cleanup_exclusion", { snapshotId, candidateId }),
+  removeCleanupExclusion: (exclusionId: string) =>
+    invoke<CleanupExclusion[]>("remove_cleanup_exclusion", { exclusionId }),
   getPreferences: () => invoke<PreferencesResponse>("get_preferences"),
   updatePreferences: (patch: AppPreferencesPatch) =>
     invoke<AppPreferences>("update_preferences", { patch }),
