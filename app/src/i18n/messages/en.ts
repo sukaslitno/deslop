@@ -33,7 +33,7 @@ export const en = {
   scanToCalculate: "Scan to calculate Deslop candidates",
   candidateData: "{bytes} candidate data",
   agentCaches: "Agent caches", editorCaches: "Editor caches", applicationCaches: "Application caches", packageCaches: "Package caches", developerCaches: "Developer caches", modelCaches: "Model caches", projectArtifacts: "Project artifacts", otherApplication: "Other application",
-  ruleClaude: "Claude Code cache", ruleCodex: "Codex logs and runtimes", ruleEditors: "Cursor / VS Code caches", ruleAppCache: "Known app caches", rulePackageCache: "Package caches", ruleXcode: "Xcode caches", ruleHuggingFace: "Hugging Face cache",
+  ruleClaude: "Claude Code cache", ruleCodex: "Codex logs and runtimes", ruleEditors: "Cursor / VS Code caches", ruleAppCache: "Known app caches", rulePackageCache: "Package caches", ruleXcode: "Xcode caches", ruleHuggingFace: "Hugging Face cache", ruleBrowsers: "Browser caches", ruleDevCaches: "Developer tool caches", ruleMacLogs: "Logs and system caches", ruleReviewModels: "Large models — review only", ruleReviewDev: "Large developer data — review only",
   noVerifiedCandidates: "No verified Deslop candidates found.",
   otherUsed: "Other used, not managed by Deslop",
   available: "Available",

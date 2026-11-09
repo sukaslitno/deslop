@@ -90,6 +90,11 @@ const RULE_TITLE_KEYS = {
   pkg: "rulePackageCache",
   xcode: "ruleXcode",
   hf: "ruleHuggingFace",
+  browsers: "ruleBrowsers",
+  devcaches: "ruleDevCaches",
+  maclogs: "ruleMacLogs",
+  review_models: "ruleReviewModels",
+  review_dev: "ruleReviewDev",
 } as const;
 
 function localizedCategoryTitle(category: Category, t: ReturnType<typeof useLocale>["t"]) {
@@ -152,7 +157,7 @@ function StorageBreakdownBar({
         {categories.map((category) => {
           const meta = STORAGE_CATEGORY_META[category.categoryId];
           const label = t(category.categoryId);
-          return <li key={category.categoryId} className="flex items-center gap-1.5" tabIndex={0} aria-label={`${label}: ${human(category.measuredBytes)}, ${t("candidateCount", { count: category.candidateCount })}`}><span className={cn("size-2 rounded-[var(--vc-radius-2)]", meta.token)} aria-hidden="true" />{label} · {human(category.measuredBytes)} · {t("candidateCount", { count: category.candidateCount })}</li>;
+          return <li key={category.categoryId} className="flex items-center gap-1.5" tabIndex={0} aria-label={`${label}: ${human(category.measuredBytes)}, ${t("candidateCount", { count: category.candidateCount })}`}><span className={cn("vc-corner-smooth size-2 rounded-[var(--vc-radius-2)]", meta.token)} aria-hidden="true" />{label} · {human(category.measuredBytes)} · {t("candidateCount", { count: category.candidateCount })}</li>;
         })}
       </ul>}
       {breakdown && categories.length === 0 && <div className="text-[var(--vc-text-secondary)] mt-3 text-style-caption">{t("noVerifiedCandidates")}</div>}
@@ -1902,7 +1907,7 @@ function PreflightDialog({
               <div className="flex justify-between gap-[var(--vc-gap-16)]"><span className="min-w-0 truncate text-[var(--vc-text-primary)]" title={entry.path}>{entry.path}</span><span className="shrink-0 tabular-nums">{human(entry.size)}</span></div>
               <p className="mt-[var(--vc-gap-4)] text-[var(--vc-text-secondary)]">{entry.scope}</p>
               {entry.restore && <p className="mt-[var(--vc-gap-4)] text-[var(--vc-text-secondary)]">{t("restore", { value: entry.restore })}</p>}
-              <button className="mt-[var(--vc-gap-8)] rounded-[var(--vc-radius-4)] text-style-caption text-[var(--vc-text-secondary)] underline outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" disabled={cleaning} onClick={() => onExclude(entry)} tabIndex={-1} type="button">{t("excludeFromCleanup")}</button>
+              <button className="vc-corner-smooth mt-[var(--vc-gap-8)] rounded-[var(--vc-radius-4)] text-style-caption text-[var(--vc-text-secondary)] underline outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" disabled={cleaning} onClick={() => onExclude(entry)} tabIndex={-1} type="button">{t("excludeFromCleanup")}</button>
             </li>
           ))}
         </ul>

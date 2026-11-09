@@ -80,7 +80,7 @@ export function TooltipContent({ className, children, ...props }: HTMLAttributes
   return (
     <span
       className={cn(
-        "pointer-events-none absolute left-1/2 top-full z-50 mt-2 w-max max-w-xs -translate-x-1/2 rounded-[var(--vc-radius-4)] border border-[var(--vc-border-strong)] bg-[var(--vc-surface-active)] px-2 py-1 text-style-caption text-[var(--vc-text-primary)]",
+        "pointer-events-none absolute left-1/2 top-full z-50 mt-2 w-max max-w-xs -translate-x-1/2 vc-corner-smooth rounded-[var(--vc-radius-4)] border border-[var(--vc-border-strong)] bg-[var(--vc-surface-active)] px-2 py-1 text-style-caption text-[var(--vc-text-primary)]",
         className,
       )}
       id={contentId}

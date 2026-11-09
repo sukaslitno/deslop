@@ -143,7 +143,7 @@ export interface CandidateOutcome {
   /** Bytes still present after a partial removal. */
   remaining?: number;
   measurement?: "allocated" | "scanEstimate" | "unknown";
-  /** Optional admission reason for skipped outcomes (not yet emitted by the backend). */
+  /** Admission reason for skipped outcomes; `allowed` when the effect was attempted. */
   reason_code?: string;
   owner?: string;
 }

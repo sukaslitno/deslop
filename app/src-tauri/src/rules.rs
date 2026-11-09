@@ -2,6 +2,7 @@
 //! project artifact by folder name: every returned path is a cache leaf below
 //! a known application/tool location.
 
+#[cfg(any(not(windows), test))]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -185,6 +186,7 @@ pub fn exact_rule_for_path(path: &Path, home: &Path) -> Option<&'static str> {
     })
 }
 
+#[cfg(not(windows))]
 fn editor_cache_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for app in ["Cursor", "Code", "Code - Insiders"] {
@@ -203,6 +205,7 @@ fn editor_cache_paths(home: &Path) -> Vec<PathBuf> {
     existing(paths)
 }
 
+#[cfg(any(not(windows), test))]
 pub fn app_cache_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         home.join("Library/Caches/com.figma.Desktop.ShipIt"),
@@ -267,6 +270,7 @@ pub fn app_cache_paths(home: &Path) -> Vec<PathBuf> {
     existing(paths)
 }
 
+#[cfg(any(not(windows), test))]
 fn append_profile_caches<const N: usize>(
     paths: &mut Vec<PathBuf>,
     profiles: &Path,
@@ -283,6 +287,7 @@ fn append_profile_caches<const N: usize>(
 
 /// Chromium-family browsers. Only these known roots are enumerated; no folder
 /// is discovered by name elsewhere.
+#[cfg(not(windows))]
 const CHROMIUM_BROWSERS: &[&str] = &[
     "Google/Chrome",
     "BraveSoftware/Brave-Browser",
@@ -292,6 +297,7 @@ const CHROMIUM_BROWSERS: &[&str] = &[
 ];
 
 /// Cache leaves directly under a Chromium user-data root (not profiles).
+#[cfg(not(windows))]
 const CHROMIUM_ROOT_LEAVES: &[&str] = &[
     "ShaderCache",
     "GrShaderCache",
@@ -301,6 +307,7 @@ const CHROMIUM_ROOT_LEAVES: &[&str] = &[
     "optimization_guide_model_store",
 ];
 
+#[cfg(not(windows))]
 fn browser_cache_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for browser in CHROMIUM_BROWSERS {
@@ -326,6 +333,7 @@ fn browser_cache_paths(home: &Path) -> Vec<PathBuf> {
 
 /// Per-profile render caches of one Chromium user-data root. Cookies, Login
 /// Data, Local Storage, IndexedDB and Sessions are never named here.
+#[cfg(not(windows))]
 fn append_chromium_profile_caches(paths: &mut Vec<PathBuf>, root: &Path) {
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
@@ -348,6 +356,7 @@ fn append_chromium_profile_caches(paths: &mut Vec<PathBuf>, root: &Path) {
     }
 }
 
+#[cfg(not(windows))]
 fn dev_cache_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = [
         ".cache/typescript",
@@ -387,6 +396,7 @@ fn dev_cache_paths(home: &Path) -> Vec<PathBuf> {
 /// macOS user-level logs and thumbnails. `DiagnosticReports` is the user's
 /// crash-report archive and is never listed; `Library/Logs/Claude` belongs to
 /// the Claude application rule.
+#[cfg(not(windows))]
 fn mac_system_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         home.join("Library/Caches/com.apple.QuickLook.thumbnailcache"),
