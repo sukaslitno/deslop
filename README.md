@@ -11,7 +11,15 @@ Download a published installer from [Releases](https://github.com/sukaslitno/des
 - **Apple Silicon** — for M-series Macs
 - **Intel** — for Intel-based Macs
 
-Open the matching `.dmg`, then move Deslop to Applications. The current builds are not code-signed or notarized, so macOS may require you to Control-click the app and choose **Open** the first time.
+Open the matching `.dmg`, then move Deslop to Applications. The builds are ad-hoc
+signed but not notarized, so the first launch is blocked by Gatekeeper: open
+**System Settings → Privacy & Security**, scroll to the Deslop message and choose
+**Open Anyway**. If macOS reports that the app is "damaged", clear the download
+quarantine flag and launch again:
+
+```sh
+xattr -cr /Applications/Deslop.app
+```
 
 To verify your download, save `checksums.txt` from the same release next to the
 installer, open Terminal in that folder, and run:
