@@ -17,7 +17,7 @@ async function boot(page: Page, options = { sixCategories: false }) {
     } };
     const harness: any = {
       calls: [] as { command: string; args: any }[], phase: "completed", mapPhase: "running", homeBlocked: false,
-      cancelError: false, snapshot, finishClean: null, releaseHome: null,
+      cancelError: false, snapshot, finishClean: null, releaseHome: null, blocked: [] as any[],
     };
     const job = () => ({ id: "scan-test", phase: harness.phase, completed_rules: 1, total_rules: 1, message: "fixture", snapshot: harness.phase === "completed" ? snapshot : null, error: harness.phase === "failed" ? "Fixture refresh failed" : null });
     (window as any).__deslopTest = harness;
@@ -33,7 +33,7 @@ async function boot(page: Page, options = { sixCategories: false }) {
         case "cancel_scan":
           if (harness.cancelError) throw new Error("Fixture cancellation failed");
           harness.phase = "cancelled"; return job();
-        case "preflight": return { id: "preflight-test", snapshot_id: snapshot.id, total: 1024, entries: categories.flatMap(c => c.entries), yellow_count: 1, warnings: [], running_apps: [], requires_yellow_confirmation: true };
+        case "preflight": return { id: "preflight-test", snapshot_id: snapshot.id, total: 1024, entries: categories.flatMap(c => c.entries), yellow_count: 1, warnings: [], running_apps: [], blocked_entries: harness.blocked, requires_yellow_confirmation: true };
         case "clean": return new Promise(resolve => { harness.finishClean = resolve; });
         case "home_dir": return harness.homeBlocked ? new Promise(resolve => { harness.releaseHome = () => resolve("/fixture"); }) : "/fixture";
         case "start_tree_scan": case "tree_job_status": return { id: "map-test", phase: harness.mapPhase, visited_nodes: 1, message: "fixture", snapshot: null, error: null };
@@ -55,7 +55,14 @@ async function scanAndConfirm(page: Page) {
 }
 
 const count = (page: Page, command: string) => page.evaluate(command => (window as any).__deslopTest.calls.filter((call: any) => call.command === command).length, command);
-const partialResult = { run_id: "fixture-run", record_error: "Fixture history error", freed: 1024, freed_size_unknown: false, deleted: ["/fixture/deleted"], skipped: ["/fixture/skipped"], errors: ["/fixture/failed"], reinstall: [], outcomes: [{ id: "skip", path: "/fixture/skipped", status: "skipped", detail: "Identity changed", freed: 0 }, { id: "error", path: "/fixture/failed", status: "error", detail: "Permission denied", freed: 0 }] };
+const partialResult = { run_id: "fixture-run", record_error: "Fixture history error", freed: 1024, freed_size_unknown: false, free_space_before: 5e10, free_space_after: 5e10 + 1024, free_space_delta: 1024, deleted: ["/fixture/deleted"], skipped: ["/fixture/skipped"], errors: ["/fixture/failed"], reinstall: [], outcomes: [{ id: "deleted", path: "/fixture/deleted", status: "deleted", detail: "", freed: 1024, remaining: 0, measurement: "allocated" }, { id: "skip", path: "/fixture/skipped", status: "skipped", detail: "Identity changed", freed: 0, remaining: 0, measurement: "unknown" }, { id: "error", path: "/fixture/failed", status: "error", detail: "Permission denied", freed: 0, remaining: 0, measurement: "unknown" }] };
+const GIB = 1024 ** 3;
+// 3 GiB of data removed but only 0.25 GiB of free space gained: the gap a
+// Time Machine snapshot or an open file handle produces on APFS.
+const heldSpaceResult = { run_id: "fixture-run", record_error: null, freed: 3 * GIB, freed_size_unknown: false, free_space_before: 5e10, free_space_after: 5e10 + GIB / 4, free_space_delta: GIB / 4, deleted: ["/fixture/pkg/cache", "/fixture/arc/Cache"], skipped: [], errors: [], reinstall: [], outcomes: [
+  { id: "entry-0", path: "/fixture/pkg/cache", status: "partial", detail: "Permission denied", freed: 2 * GIB, remaining: GIB / 2, measurement: "allocated" },
+  { id: "arc", path: "/fixture/arc/Cache", status: "recreated", detail: "Recreated by Arc", freed: GIB, remaining: 0, measurement: "scanEstimate" },
+] };
 
 test("preflight is explicit, traps focus, and Escape returns to the initiator without deleting", async ({ page }) => {
   await boot(page);
@@ -146,4 +153,36 @@ test("all six legends fit at minimum size and Settings returns keyboard focus", 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeFocused();
+});
+
+test("result shows data removed and free-space gain as two numbers and explains the gap", async ({ page }) => {
+  await boot(page);
+  await scanAndConfirm(page);
+  await page.getByRole("button", { name: "Confirm and clean", exact: true }).click();
+  await page.evaluate(result => { (window as any).__deslopTest.finishClean(result); }, heldSpaceResult);
+  await expect(page.getByText("Cleanup completed", { exact: true })).toBeVisible();
+  const removed = page.getByTestId("result-removed");
+  await expect(removed).toContainText("Data removed");
+  await expect(removed).toContainText("3 GiB");
+  await expect(removed).toContainText("≈ scan estimate");
+  const freeSpace = page.getByTestId("result-free-space");
+  await expect(freeSpace).toContainText("Free space increased by");
+  await expect(freeSpace).toContainText("256 MiB");
+  await expect(page.getByText(/local Time Machine snapshots can hold space/)).toBeVisible();
+  await expect(page.getByText(/Partially removed: 2 GiB, 512 MiB left/)).toBeVisible();
+  await expect(page.getByText("Removed; the app immediately recreated its cache", { exact: false })).toBeVisible();
+  await expect(page.getByText(/0 skipped · 0 errors/)).toBeVisible();
+});
+
+test("a blocked preflight entry shows a localized reason with the raw detail as a caption", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => {
+    (window as any).__deslopTest.blocked = [{ id: "cursor", path: "/fixture/Cursor/Cache", owner: "Cursor", state: "busy", reasonCode: "owner_running", detail: "Cursor is running (Cursor Helper)" }];
+  });
+  await scanAndConfirm(page);
+  const dialog = page.getByRole("dialog");
+  const blocked = dialog.getByRole("region", { name: "Not included in this cleanup" });
+  await expect(blocked).toContainText("Cursor is running — quit the app and try again");
+  await expect(blocked).toContainText("Cursor is running (Cursor Helper)");
+  expect(await count(page, "clean")).toBe(0);
 });

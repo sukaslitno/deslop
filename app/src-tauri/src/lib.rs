@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const POLICY_FINGERPRINT: &str = "2026-09-25-snapshot-v2";
+const POLICY_FINGERPRINT: &str = "2026-11-09-snapshot-v3";
 const PROTECTED_SUFFIXES: &[&[&str]] = &[
     &[".claude", "projects"],
     &[".claude", "todos"],
@@ -47,10 +47,15 @@ const NEVER_NAMES: &[&str] = &[
 ];
 const EXTERNAL_MEASUREMENT_TIMEOUT: Duration = Duration::from_secs(10);
 const EXTERNAL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// One `lsof` call covers every SQLite family of a candidate. `lsof` walks the
+/// descriptors of every process, which regularly takes several seconds on a
+/// busy Mac, so this budget is deliberately larger than the per-process probe.
+#[cfg(not(windows))]
+const SQLITE_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const NATIVE_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SAFE_SIZE_ENTRIES: usize = 1_000_000;
 const EXCLUSIONS_SCHEMA_VERSION: u32 = 1;
-const RUN_SCHEMA_VERSION: u8 = 2;
+const RUN_SCHEMA_VERSION: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
@@ -84,6 +89,9 @@ enum ActionMethod {
 enum ProbeRequirement {
     None,
     Owner,
+    /// Owner process check, then the Chromium/Electron `SingletonLock` of the
+    /// owner's profile, then a cheap, bounded open-file check of top-level
+    /// SQLite families. It never walks a whole cache tree.
     OwnerAndSqlite,
 }
 
@@ -181,7 +189,7 @@ const RULES: &[Rule] = &[
     Rule { id: "claude", title: "Claude Code cache", tier: Tier::Green, cleanup_category: CleanupCategoryId::AgentCaches, owner: "Claude Code", action: ActionMethod::Delete, required_probe: ProbeRequirement::None, supported_on: &["macos", "windows"], note: "Only shell snapshots, logs and statsig. Projects, memory, todos and file history stay protected.", restore: None },
     Rule { id: "codex", title: "Codex logs and runtimes", tier: Tier::Yellow, cleanup_category: CleanupCategoryId::AgentCaches, owner: "Codex", action: ActionMethod::Delete, required_probe: ProbeRequirement::None, supported_on: &["macos"], note: "Rollout sessions are protected. Runtimes download again on demand.", restore: Some("Run Codex again to download required runtimes.") },
     Rule { id: "editors", title: "Cursor / VS Code caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::EditorCaches, owner: "Editor", action: ActionMethod::Delete, required_probe: ProbeRequirement::OwnerAndSqlite, supported_on: &["macos", "windows"], note: "Exact render caches only; settings and extensions are not selected.", restore: None },
-    Rule { id: "appcache", title: "Known app caches", tier: Tier::Yellow, cleanup_category: CleanupCategoryId::ApplicationCaches, owner: "Application", action: ActionMethod::Delete, required_probe: ProbeRequirement::OwnerAndSqlite, supported_on: &["macos", "windows"], note: "Exact application cache roots only. Service Worker CacheStorage is review-only because an exact path alone does not prove it can be recreated.", restore: Some("Open the owning application after cleanup; it may recreate cache data.") },
+    Rule { id: "appcache", title: "Known app caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::ApplicationCaches, owner: "Application", action: ActionMethod::Delete, required_probe: ProbeRequirement::OwnerAndSqlite, supported_on: &["macos", "windows"], note: "Exact application cache roots only. Service Worker CacheStorage is review-only because an exact path alone does not prove it can be recreated.", restore: Some("Open the owning application after cleanup; it may recreate cache data.") },
     Rule { id: "pkg", title: "Package caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::PackageCaches, owner: "Package tools", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos", "windows"], note: "Exact package-manager cache roots; projects are not selected.", restore: None },
     Rule { id: "xcode", title: "Xcode caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::DeveloperCaches, owner: "Xcode", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos"], note: "Derived data and simulator cache are rebuilt by Xcode.", restore: None },
     Rule { id: "hf", title: "Hugging Face cache", tier: Tier::Yellow, cleanup_category: CleanupCategoryId::ModelCaches, owner: "Hugging Face", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos"], note: "Models and datasets are never selected automatically; their exact path alone does not prove recovery is safe.", restore: Some("Re-run the model or dataset download.") },
@@ -192,6 +200,9 @@ const RULES: &[Rule] = &[
 struct Entry {
     id: String,
     path: String,
+    /// Per-entry tier; may be stricter than its category (e.g. Service Worker
+    /// CacheStorage inside the GREEN application-cache category).
+    tier: Tier,
     size: u64,
     size_known: bool,
     reason: String,
@@ -770,7 +781,7 @@ fn add_candidate(
         Err(_) => return,
     };
     let id = state.next_id("candidate");
-    let owner = candidate_owner(rule, &canonical_path);
+    let owner = candidate_owner(rule, &canonical_path, &state.home);
     let tier = candidate_tier(rule, &canonical_path);
     let action = if tier == Tier::Red {
         ActionMethod::Manual
@@ -798,7 +809,7 @@ fn add_candidate(
             size_known: false,
             reason: candidate_reason(rule, &path),
             scope: "Exact owned cache path".into(),
-            restore: rule.restore.map(str::to_string),
+            restore: candidate_restore(rule, &path),
             policy_fingerprint: POLICY_FINGERPRINT.into(),
         },
     );
@@ -808,37 +819,74 @@ fn rule_for_id(rule_id: &str) -> Option<Rule> {
     RULES.iter().copied().find(|rule| rule.id == rule_id)
 }
 
-fn candidate_owner(rule: Rule, path: &Path) -> String {
-    let rendered = path.to_string_lossy();
+/// Path components below `home`. Owner and tier decisions must never depend on
+/// the account name: a user called `Marcus`, `Arcadia` or `luvi` must not turn
+/// every cache into "Arc" or "uv".
+fn relative_components(path: &Path, home: &Path) -> Vec<String> {
+    path.strip_prefix(home)
+        .unwrap_or(path)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_part(parts: &[String], predicate: impl Fn(&str) -> bool) -> bool {
+    parts.iter().any(|part| predicate(part))
+}
+
+fn candidate_owner(rule: Rule, path: &Path, home: &Path) -> String {
+    let parts = relative_components(path, home);
+    let lower = |needle: &str| {
+        has_part(&parts, |part: &str| {
+            part.to_ascii_lowercase().contains(needle)
+        })
+    };
+    let exact = |name: &str| has_part(&parts, |part: &str| part == name);
     match rule.id {
-        "appcache" if rendered.contains("Slack") || rendered.contains("slack") => "Slack".into(),
-        "appcache" if rendered.contains("Figma") || rendered.contains("figma") => "Figma".into(),
-        "appcache" if rendered.contains("Arc") || rendered.contains("thebrowser") => "Arc".into(),
-        "appcache" if rendered.contains("Claude") => "Claude".into(),
-        "appcache" if rendered.contains("Codex") || rendered.contains("codex") => "Codex".into(),
-        "appcache" if rendered.contains("ChatGPT") || rendered.contains("openai.chat") => {
-            "ChatGPT".into()
-        }
-        "appcache" if rendered.contains("Lark") => "Lark".into(),
-        "editors" if rendered.contains("Cursor") => "Cursor".into(),
-        "editors" if rendered.contains("Code - Insiders") => "Code - Insiders".into(),
+        "appcache" if lower("slack") => "Slack".into(),
+        "appcache" if lower("figma") => "Figma".into(),
+        "appcache" if exact("Arc") || lower("thebrowser") => "Arc".into(),
+        "appcache" if exact("Claude") => "Claude".into(),
+        "appcache" if lower("codex") => "Codex".into(),
+        "appcache" if exact("ChatGPT") || exact("com.openai.chat") => "ChatGPT".into(),
+        "appcache" if has_part(&parts, |part: &str| part.starts_with("Lark")) => "Lark".into(),
+        "editors" if exact("Cursor") => "Cursor".into(),
+        "editors" if exact("Code - Insiders") => "Code - Insiders".into(),
         "editors" => "Code".into(),
-        "pkg" if rendered.contains("uv") => "uv".into(),
-        "pkg" if rendered.contains("pnpm") => "pnpm".into(),
-        "pkg" if rendered.contains("bun") => "Bun".into(),
-        "pkg" if rendered.contains("npm") => "npm".into(),
-        "pkg" if rendered.contains("pip") => "pip".into(),
-        "pkg" if rendered.contains("Homebrew") => "Homebrew".into(),
+        "pkg" if exact("uv") => "uv".into(),
+        "pkg" if has_part(&parts, |part: &str| part.starts_with("pnpm")) => "pnpm".into(),
+        "pkg" if exact(".bun") => "Bun".into(),
+        "pkg" if exact(".npm") || exact("npm-cache") => "npm".into(),
+        "pkg" if exact("pip") => "pip".into(),
+        "pkg" if exact("Homebrew") => "Homebrew".into(),
         _ => rule.owner.into(),
     }
 }
 
+fn is_service_worker_cache(path: &Path) -> bool {
+    path.ends_with("Service Worker/CacheStorage")
+}
+
+fn is_playwright_browsers(path: &Path) -> bool {
+    path.ends_with("Library/Caches/ms-playwright")
+}
+
+fn is_jetbrains_cache(path: &Path) -> bool {
+    path.ends_with("Library/Caches/JetBrains")
+}
+
 fn candidate_tier(rule: Rule, path: &Path) -> Tier {
-    let rendered = path.to_string_lossy();
-    if rule.id == "appcache" && rendered.contains("Service Worker/CacheStorage") {
+    if rule.id == "appcache" && is_service_worker_cache(path) {
         // Exact location is not a recovery contract for offline application
         // data. It is visible only after explicit review and never selected
         // automatically.
+        Tier::Yellow
+    } else if rule.id == "pkg" && (is_playwright_browsers(path) || is_jetbrains_cache(path)) {
+        // Installed browser binaries and IDE indexes are expensive to
+        // recreate; they are offered only after explicit review.
         Tier::Yellow
     } else {
         rule.tier
@@ -846,15 +894,25 @@ fn candidate_tier(rule: Rule, path: &Path) -> Tier {
 }
 
 fn candidate_reason(rule: Rule, path: &Path) -> String {
-    if rule.id == "appcache"
-        && path
-            .to_string_lossy()
-            .contains("Service Worker/CacheStorage")
-    {
+    if rule.id == "appcache" && is_service_worker_cache(path) {
         "Service Worker CacheStorage needs explicit review; Deslop never selects it automatically."
             .into()
+    } else if rule.id == "pkg" && is_playwright_browsers(path) {
+        "installed browser binaries for Playwright; re-download required".into()
+    } else if rule.id == "pkg" && is_jetbrains_cache(path) {
+        "IDE indexes rebuild slowly".into()
     } else {
         rule.note.into()
+    }
+}
+
+fn candidate_restore(rule: Rule, path: &Path) -> Option<String> {
+    if rule.id == "pkg" && is_playwright_browsers(path) {
+        Some("npx playwright install".into())
+    } else if rule.id == "pkg" && is_jetbrains_cache(path) {
+        Some("Reopen the JetBrains IDE; it rebuilds its indexes.".into())
+    } else {
+        rule.restore.map(str::to_string)
     }
 }
 
@@ -1577,6 +1635,7 @@ where
                         reason: candidate.reason.clone(),
                         scope: candidate.scope.clone(),
                         restore: candidate.restore.clone(),
+                        tier: candidate.tier,
                     })
                     .collect();
                 entries.sort_by(|a, b| b.size.cmp(&a.size));
@@ -1616,6 +1675,7 @@ where
                 reason: candidate.reason.clone(),
                 scope: candidate.scope.clone(),
                 restore: candidate.restore.clone(),
+                tier: candidate.tier,
             })
             .collect();
         entries.sort_by(|a, b| b.size.cmp(&a.size));
@@ -1696,14 +1756,29 @@ enum ProbeState {
 }
 
 /// OS-facing state is isolated so the policy can be fixture-tested without
-/// invoking `pgrep`/`lsof`. A probe failure is deliberately not an idle result.
+/// invoking `pgrep`/`ps`/`lsof`/`tasklist`. A probe failure is deliberately
+/// not an idle result.
 trait SafetyProbe {
     fn owner_state(&self, owner: &str) -> ProbeState;
     fn sqlite_state(&self, candidate: &Path) -> ProbeState;
+    /// Chromium/Electron profile lock of the owner. The default is the real
+    /// check below `home`; a fixture home without a lock file is inert.
+    fn singleton_lock_state(&self, owner: &str, candidate: &Path, home: &Path) -> ProbeState {
+        system_singleton_lock_state(owner, candidate, home)
+    }
+    /// Allocated bytes of a path, measured immediately before the effect.
+    fn allocated_bytes(&self, path: &Path) -> Option<u64> {
+        du_bytes(path)
+    }
 }
 
 struct SystemSafetyProbe;
 
+/// Process names whose presence means the owner may be writing the cache.
+/// Generic runtimes (`node`, `python`, `python3`) are deliberately absent:
+/// a developer almost always has one running (Claude Code, language servers)
+/// and that says nothing about a content-addressed package cache (F-02).
+#[cfg_attr(windows, allow(dead_code))]
 fn process_names_for_owner(owner: &str) -> Vec<&'static str> {
     match owner {
         "Cursor" => vec![
@@ -1744,14 +1819,14 @@ fn process_names_for_owner(owner: &str) -> Vec<&'static str> {
             "XCBBuildService",
             "swift-frontend",
         ],
-        "pnpm" => vec!["pnpm", "node"],
-        "npm" => vec!["npm", "node"],
+        "pnpm" => vec!["pnpm"],
+        "npm" => vec!["npm"],
         "Bun" => vec!["bun"],
-        "uv" => vec!["uv", "python", "python3"],
-        "pip" => vec!["pip", "pip3", "python", "python3"],
+        "uv" => vec!["uv"],
+        "pip" => vec!["pip", "pip3"],
         "Homebrew" => vec!["brew", "ruby"],
-        "Hugging Face" => vec!["python", "python3"],
-        "Project Node build" => vec!["node", "pnpm", "npm", "npx", "yarn", "bun"],
+        "Hugging Face" => vec!["huggingface-cli", "hf"],
+        "Project Node build" => vec!["pnpm", "npm", "npx", "yarn", "bun"],
         "Project Rust build" => vec!["cargo", "rustc", "build-script-build"],
         _ => Vec::new(),
     }
@@ -1765,7 +1840,7 @@ impl SafetyProbe for SystemSafetyProbe {
             return ProbeState::Idle;
         }
         let mut busy = Vec::new();
-        let mut unknown = None;
+        let mut unknown: Option<(&'static str, String)> = None;
         for name in names {
             let mut command = Command::new("pgrep");
             command.arg("-x").arg(name);
@@ -1773,23 +1848,30 @@ impl SafetyProbe for SystemSafetyProbe {
                 Ok(output) if output.status.success() => busy.push(name.to_string()),
                 Ok(output) if output.status.code() == Some(1) => {}
                 Ok(_) => {
-                    unknown = Some(format!(
-                        "process check for {name} returned an unexpected status"
+                    unknown = Some((
+                        "process_probe_unavailable",
+                        format!("process check for {name} returned an unexpected status"),
                     ))
                 }
                 Err(MeasurementCommandError::TimedOut) => {
-                    unknown = Some(format!("process check for {name} timed out"))
+                    unknown = Some((
+                        "process_probe_timeout",
+                        format!("process check for {name} timed out"),
+                    ))
                 }
                 Err(MeasurementCommandError::Failed) => {
-                    unknown = Some(format!("process check for {name} is unavailable"))
+                    unknown = Some((
+                        "process_probe_unavailable",
+                        format!("process check for {name} is unavailable"),
+                    ))
                 }
             }
         }
         if !busy.is_empty() {
             ProbeState::Busy(busy)
-        } else if let Some(detail) = unknown {
+        } else if let Some((reason_code, detail)) = unknown {
             ProbeState::Unknown {
-                reason_code: "process_probe_unavailable",
+                reason_code,
                 detail,
             }
         } else {
@@ -1798,109 +1880,375 @@ impl SafetyProbe for SystemSafetyProbe {
     }
 
     fn sqlite_state(&self, candidate: &Path) -> ProbeState {
-        let families = match sqlite_families(candidate) {
-            Ok(families) => families,
-            Err(detail) => {
-                return ProbeState::Unknown {
-                    reason_code: "sqlite_family_incomplete",
-                    detail,
-                }
-            }
-        };
-        for family in families {
-            let mut command = Command::new("lsof");
-            command.arg("-Fpc").arg("--");
-            command.args(&family);
-            match output_with_timeout(&mut command, EXTERNAL_PROBE_TIMEOUT) {
+        system_sqlite_state(candidate)
+    }
+}
+
+/// Windows has no `pgrep`; `tasklist` gives the same three-state answer.
+#[cfg(windows)]
+impl SafetyProbe for SystemSafetyProbe {
+    fn owner_state(&self, owner: &str) -> ProbeState {
+        use std::os::windows::process::CommandExt;
+        // Keep the GUI app from flashing a console window for every probe.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let images = windows_image_names_for_owner(owner);
+        if images.is_empty() {
+            return ProbeState::Idle;
+        }
+        let mut busy = Vec::new();
+        let mut unknown: Option<(&'static str, String)> = None;
+        for image in images {
+            let mut command = Command::new("tasklist");
+            command
+                .arg("/FI")
+                .arg(format!("IMAGENAME eq {image}"))
+                .args(["/FO", "CSV", "/NH"])
+                .creation_flags(CREATE_NO_WINDOW);
+            match output_with_timeout(&mut command, WINDOWS_PROCESS_PROBE_TIMEOUT) {
                 Ok(output) if output.status.success() => {
-                    return ProbeState::Busy(vec![format!(
-                        "SQLite database in {}",
-                        candidate.display()
-                    )]);
+                    if tasklist_lists_image(&String::from_utf8_lossy(&output.stdout), image) {
+                        busy.push(image.to_string());
+                    }
                 }
-                Ok(output) if output.status.code() == Some(1) && output.stderr.is_empty() => {}
                 Ok(_) => {
-                    return ProbeState::Unknown {
-                        reason_code: "sqlite_probe_unavailable",
-                        detail: format!(
-                            "open-file check for SQLite data in {} was incomplete",
-                            candidate.display()
-                        ),
-                    };
+                    unknown = Some((
+                        "process_probe_unavailable",
+                        format!("process check for {image} returned an unexpected status"),
+                    ))
                 }
                 Err(MeasurementCommandError::TimedOut) => {
-                    return ProbeState::Unknown {
-                        reason_code: "sqlite_probe_timeout",
-                        detail: format!(
-                            "open-file check for SQLite data in {} timed out",
-                            candidate.display()
-                        ),
-                    };
+                    unknown = Some((
+                        "process_probe_timeout",
+                        format!("process check for {image} timed out"),
+                    ))
                 }
                 Err(MeasurementCommandError::Failed) => {
-                    return ProbeState::Unknown {
-                        reason_code: "sqlite_probe_unavailable",
-                        detail: format!(
-                            "open-file check for SQLite data in {} is unavailable",
-                            candidate.display()
-                        ),
-                    };
+                    unknown = Some((
+                        "process_probe_unavailable",
+                        format!("process check for {image} is unavailable"),
+                    ))
                 }
             }
         }
+        if !busy.is_empty() {
+            ProbeState::Busy(busy)
+        } else if let Some((reason_code, detail)) = unknown {
+            ProbeState::Unknown {
+                reason_code,
+                detail,
+            }
+        } else {
+            ProbeState::Idle
+        }
+    }
+
+    /// There is no `lsof` on Windows. It is also not needed there: Windows
+    /// refuses to delete a file another process holds open without
+    /// `FILE_SHARE_DELETE`, so an in-use database surfaces as a per-entry
+    /// error instead of a silent unlink. The owner check above has already
+    /// passed when this runs.
+    fn sqlite_state(&self, _candidate: &Path) -> ProbeState {
         ProbeState::Idle
     }
 }
 
 #[cfg(windows)]
-impl SafetyProbe for SystemSafetyProbe {
-    fn owner_state(&self, owner: &str) -> ProbeState {
-        ProbeState::Unknown {
-            reason_code: "process_probe_unsupported",
-            detail: format!("the running-app check for {owner} is not implemented on Windows"),
-        }
-    }
+const WINDOWS_PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
-    fn sqlite_state(&self, candidate: &Path) -> ProbeState {
-        ProbeState::Unknown {
-            reason_code: "sqlite_probe_unsupported",
-            detail: format!(
-                "the SQLite open-file check for {} is not implemented on Windows",
-                candidate.display()
-            ),
-        }
+/// Windows image names per owner. `npm`/`yarn` run as `*.cmd` scripts under
+/// the generic `node.exe`, which is never used as evidence (see
+/// `process_names_for_owner`), so those owners have no image to check.
+#[cfg(any(windows, test))]
+fn windows_image_names_for_owner(owner: &str) -> Vec<&'static str> {
+    match owner {
+        "Cursor" => vec!["Cursor.exe"],
+        "Code" => vec!["Code.exe"],
+        "Code - Insiders" => vec!["Code - Insiders.exe"],
+        "Slack" => vec!["slack.exe"],
+        "Figma" => vec!["Figma.exe"],
+        "Arc" => vec!["Arc.exe"],
+        "Claude" => vec!["claude.exe"],
+        "Codex" => vec!["codex.exe"],
+        "ChatGPT" => vec!["ChatGPT.exe"],
+        "Lark" => vec!["Lark.exe"],
+        "pnpm" => vec!["pnpm.exe"],
+        "Bun" => vec!["bun.exe"],
+        "uv" => vec!["uv.exe"],
+        "pip" => vec!["pip.exe", "pip3.exe"],
+        "Project Node build" => vec!["pnpm.exe", "bun.exe"],
+        "Project Rust build" => vec!["cargo.exe", "rustc.exe"],
+        _ => Vec::new(),
     }
 }
 
-/// Returns only complete SQLite families: a lone old `-shm` file is not proof
-/// of an active database. We never read database contents while determining it.
-fn sqlite_families(candidate: &Path) -> Result<Vec<Vec<PathBuf>>, String> {
+/// `tasklist /FO CSV /NH` prints one quoted CSV row per match and a localized
+/// "INFO: ..." line when nothing matches, so only a quoted first field that
+/// equals the image name counts as a running process.
+#[cfg(any(windows, test))]
+fn tasklist_lists_image(stdout: &str, image: &str) -> bool {
+    stdout.lines().any(|line| {
+        line.trim()
+            .strip_prefix('"')
+            .and_then(|rest| rest.split_once('"'))
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case(image))
+    })
+}
+
+/// Windows has no `SingletonLock` symlink (the file there carries no pid), so
+/// the lock check is skipped and `tasklist` is the owner evidence.
+#[cfg(windows)]
+fn system_singleton_lock_state(_owner: &str, _candidate: &Path, _home: &Path) -> ProbeState {
+    ProbeState::Idle
+}
+
+#[cfg(not(windows))]
+fn system_singleton_lock_state(owner: &str, candidate: &Path, home: &Path) -> ProbeState {
+    singleton_lock_state_for_dirs(owner, &singleton_lock_dirs(owner, candidate, home))
+}
+
+/// Chromium "user data" directories whose `SingletonLock` proves a live
+/// instance of the owner. When the candidate lives inside one of them, only
+/// those directories are consulted (so a Slack cache never touches the
+/// sandbox container of a different Slack install).
+#[cfg(not(windows))]
+fn singleton_lock_dirs(owner: &str, candidate: &Path, home: &Path) -> Vec<PathBuf> {
+    const MAX_PROFILE_DIRS: usize = 32;
+    let support = home.join("Library/Application Support");
+    let mut dirs = match owner {
+        "Cursor" => vec![support.join("Cursor")],
+        "Code" => vec![support.join("Code")],
+        "Code - Insiders" => vec![support.join("Code - Insiders")],
+        "Slack" => vec![
+            support.join("Slack"),
+            home.join(
+                "Library/Containers/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack",
+            ),
+        ],
+        "Figma" => vec![support.join("Figma")],
+        "Arc" => vec![support.join("Arc/User Data"), support.join("Arc")],
+        "Claude" => vec![support.join("Claude")],
+        "Codex" => vec![support.join("Codex")],
+        "ChatGPT" => vec![support.join("ChatGPT"), support.join("com.openai.chat")],
+        "Lark" => vec![support.join("LarkInternational"), support.join("Lark")],
+        _ => Vec::new(),
+    };
+    if owner == "Figma" {
+        if let Ok(entries) = fs::read_dir(support.join("Figma/DesktopProfile")) {
+            for entry in entries.flatten().take(MAX_PROFILE_DIRS) {
+                if entry.file_name().to_string_lossy().starts_with('v') {
+                    dirs.push(entry.path());
+                }
+            }
+        }
+    }
+    let related: Vec<PathBuf> = dirs
+        .iter()
+        .filter(|dir| candidate.starts_with(dir))
+        .cloned()
+        .collect();
+    if related.is_empty() {
+        dirs
+    } else {
+        related
+    }
+}
+
+#[cfg(not(windows))]
+enum SingletonLock {
+    Absent,
+    Pid(u32),
+    Unreadable(String),
+}
+
+/// Chromium writes `SingletonLock` as a symlink whose target is
+/// `<hostname>-<pid>`. The pid is the last `-`-separated field because host
+/// names may themselves contain dashes.
+#[cfg(not(windows))]
+fn parse_singleton_lock_target(target: &str) -> Option<u32> {
+    let (_host, pid) = target.rsplit_once('-')?;
+    pid.parse::<u32>().ok().filter(|pid| *pid > 0)
+}
+
+#[cfg(not(windows))]
+fn read_singleton_lock(dir: &Path) -> SingletonLock {
+    let lock = dir.join("SingletonLock");
+    match fs::symlink_metadata(&lock) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SingletonLock::Absent,
+        Err(error) => {
+            SingletonLock::Unreadable(format!("{} could not be read: {error}", lock.display()))
+        }
+        Ok(_) => match fs::read_link(&lock) {
+            Ok(target) => match parse_singleton_lock_target(&target.to_string_lossy()) {
+                Some(pid) => SingletonLock::Pid(pid),
+                None => SingletonLock::Unreadable(format!(
+                    "{} does not name an owner process",
+                    lock.display()
+                )),
+            },
+            Err(error) => SingletonLock::Unreadable(format!(
+                "{} is not a readable lock: {error}",
+                lock.display()
+            )),
+        },
+    }
+}
+
+/// `ps -p` answers for any user's process (unlike `kill -0`, which fails with
+/// EPERM), exits 1 when the pid does not exist, and needs no libc binding.
+#[cfg(not(windows))]
+fn process_is_alive(pid: u32) -> Result<bool, (&'static str, String)> {
+    let mut command = Command::new("ps");
+    command.arg("-p").arg(pid.to_string()).arg("-o").arg("pid=");
+    match output_with_timeout(&mut command, EXTERNAL_PROBE_TIMEOUT) {
+        Ok(output) if output.status.success() => {
+            Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+        }
+        Ok(output) if output.status.code() == Some(1) => Ok(false),
+        Ok(_) => Err((
+            "process_probe_unavailable",
+            format!("process check for pid {pid} returned an unexpected status"),
+        )),
+        Err(MeasurementCommandError::TimedOut) => Err((
+            "process_probe_timeout",
+            format!("process check for pid {pid} timed out"),
+        )),
+        Err(MeasurementCommandError::Failed) => Err((
+            "process_probe_unavailable",
+            format!("process check for pid {pid} is unavailable"),
+        )),
+    }
+}
+
+/// Live pid → busy; no lock or a dead pid (stale lock after a crash) → idle;
+/// an unreadable or unparsable lock → unknown.
+#[cfg(not(windows))]
+fn singleton_lock_state_for_dirs(owner: &str, dirs: &[PathBuf]) -> ProbeState {
+    let mut unknown: Option<(&'static str, String)> = None;
+    for dir in dirs {
+        match read_singleton_lock(dir) {
+            SingletonLock::Absent => {}
+            SingletonLock::Unreadable(detail) => unknown = Some(("lock_unreadable", detail)),
+            SingletonLock::Pid(pid) => match process_is_alive(pid) {
+                Ok(true) => {
+                    return ProbeState::Busy(vec![format!(
+                        "{owner} profile lock held by pid {pid}"
+                    )])
+                }
+                Ok(false) => {}
+                Err(reason) => unknown = Some(reason),
+            },
+        }
+    }
+    match unknown {
+        Some((reason_code, detail)) => ProbeState::Unknown {
+            reason_code,
+            detail,
+        },
+        None => ProbeState::Idle,
+    }
+}
+
+/// One `lsof` call for every SQLite family near the candidate root.
+#[cfg(not(windows))]
+fn system_sqlite_state(candidate: &Path) -> ProbeState {
+    let files: Vec<PathBuf> = sqlite_families(candidate).into_iter().flatten().collect();
+    if files.is_empty() {
+        return ProbeState::Idle;
+    }
+    let mut command = Command::new("lsof");
+    // `-w` suppresses warnings about unrelated mounts that would otherwise
+    // make an idle answer look like a failure.
+    command.arg("-w").arg("-Fpc").arg("--").args(&files);
+    match output_with_timeout(&mut command, SQLITE_PROBE_TIMEOUT) {
+        Ok(output) => {
+            let holders = lsof_holders(&String::from_utf8_lossy(&output.stdout));
+            if !holders.is_empty() {
+                ProbeState::Busy(holders)
+            } else if output.status.success() {
+                ProbeState::Busy(vec![format!("SQLite database in {}", candidate.display())])
+            } else if output.status.code() == Some(1) {
+                // lsof exits 1 when none of the named files is open.
+                ProbeState::Idle
+            } else {
+                ProbeState::Unknown {
+                    reason_code: "sqlite_probe_unavailable",
+                    detail: format!(
+                        "open-file check for SQLite data in {} was incomplete",
+                        candidate.display()
+                    ),
+                }
+            }
+        }
+        Err(MeasurementCommandError::TimedOut) => ProbeState::Unknown {
+            reason_code: "sqlite_probe_timeout",
+            detail: format!(
+                "open-file check for SQLite data in {} timed out",
+                candidate.display()
+            ),
+        },
+        Err(MeasurementCommandError::Failed) => ProbeState::Unknown {
+            reason_code: "sqlite_probe_unavailable",
+            detail: format!(
+                "open-file check for SQLite data in {} is unavailable",
+                candidate.display()
+            ),
+        },
+    }
+}
+
+/// Process names (`c` lines) from `lsof -F`, falling back to pids (`p` lines).
+#[cfg(not(windows))]
+fn lsof_holders(stdout: &str) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    let mut pids = BTreeSet::new();
+    for line in stdout.lines() {
+        if let Some(name) = line.strip_prefix('c') {
+            names.insert(name.to_string());
+        } else if let Some(pid) = line.strip_prefix('p') {
+            pids.insert(format!("pid {pid}"));
+        }
+    }
+    if names.is_empty() {
+        pids.into_iter().collect()
+    } else {
+        names.into_iter().collect()
+    }
+}
+
+/// Returns complete SQLite families at depth ≤ 2 below the candidate: a lone
+/// old `-shm` file is not proof of an active database, and database contents
+/// are never read. Chromium/Electron keep their databases at the profile root,
+/// never inside `Cache_Data`, so the whole tree is not walked. Reaching the
+/// entry bound or an unreadable entry means "checked what we could", never
+/// "unknown" — a large cache must not be blocked by its size (F-01).
+#[cfg_attr(windows, allow(dead_code))]
+fn sqlite_families(candidate: &Path) -> Vec<Vec<PathBuf>> {
+    const MAX_SQLITE_DEPTH: usize = 2;
     const MAX_SQLITE_DISCOVERY_ENTRIES: usize = 2_048;
-    let mut pending = vec![candidate.to_path_buf()];
+    let mut pending = vec![(candidate.to_path_buf(), 0usize)];
     let mut bases = BTreeSet::new();
     let mut visited = 0usize;
-    while let Some(current) = pending.pop() {
+    while let Some((current, depth)) = pending.pop() {
         visited += 1;
         if visited > MAX_SQLITE_DISCOVERY_ENTRIES {
-            return Err("SQLite family discovery exceeded its bounded budget".into());
+            break;
         }
-        let meta = fs::symlink_metadata(&current)
-            .map_err(|_| "SQLite family discovery could not read a path".to_string())?;
+        let Ok(meta) = fs::symlink_metadata(&current) else {
+            continue;
+        };
         if meta.file_type().is_symlink() {
             continue;
         }
         if meta.is_dir() {
-            let entries = fs::read_dir(&current).map_err(|_| {
-                "SQLite family discovery could not enumerate a directory".to_string()
-            })?;
-            for entry in entries {
-                pending.push(
-                    entry
-                        .map_err(|_| {
-                            "SQLite family discovery found an unreadable entry".to_string()
-                        })?
-                        .path(),
-                );
+            if depth >= MAX_SQLITE_DEPTH {
+                continue;
+            }
+            let Ok(entries) = fs::read_dir(&current) else {
+                continue;
+            };
+            let room = MAX_SQLITE_DISCOVERY_ENTRIES.saturating_sub(visited + pending.len());
+            for entry in entries.flatten().take(room) {
+                pending.push((entry.path(), depth + 1));
             }
             continue;
         }
@@ -1912,7 +2260,7 @@ fn sqlite_families(candidate: &Path) -> Result<Vec<Vec<PathBuf>>, String> {
             bases.insert(current);
         }
     }
-    Ok(bases
+    bases
         .into_iter()
         .map(|base| {
             let mut family = vec![base.clone()];
@@ -1924,7 +2272,7 @@ fn sqlite_families(candidate: &Path) -> Result<Vec<Vec<PathBuf>>, String> {
             }
             family
         })
-        .collect())
+        .collect()
 }
 
 #[derive(Clone, Serialize)]
@@ -1932,6 +2280,7 @@ fn sqlite_families(candidate: &Path) -> Result<Vec<Vec<PathBuf>>, String> {
 struct Admission {
     id: String,
     path: String,
+    owner: String,
     state: String,
     reason_code: String,
     detail: String,
@@ -1942,6 +2291,7 @@ impl Admission {
         Self {
             id: candidate.id.clone(),
             path: candidate.canonical_path.to_string_lossy().to_string(),
+            owner: candidate.owner.clone(),
             state: "allowed".into(),
             reason_code: "allowed".into(),
             detail: "Ready to clean after current safety checks.".into(),
@@ -1956,6 +2306,7 @@ impl Admission {
         Self {
             id: candidate.id.clone(),
             path: candidate.canonical_path.to_string_lossy().to_string(),
+            owner: candidate.owner.clone(),
             state: state.into(),
             reason_code: reason_code.into(),
             detail: detail.into(),
@@ -2018,6 +2369,21 @@ fn candidate_admission(
         } => return Admission::blocked(candidate, "unknown", reason_code, detail),
     }
     if candidate.required_probe == ProbeRequirement::OwnerAndSqlite {
+        match probe.singleton_lock_state(&candidate.owner, &candidate.canonical_path, home) {
+            ProbeState::Idle => {}
+            ProbeState::Busy(holders) => {
+                return Admission::blocked(
+                    candidate,
+                    "busy",
+                    "singleton_lock_live",
+                    format!("{} is running ({})", candidate.owner, holders.join(", ")),
+                )
+            }
+            ProbeState::Unknown {
+                reason_code,
+                detail,
+            } => return Admission::blocked(candidate, "unknown", reason_code, detail),
+        }
         match probe.sqlite_state(&candidate.canonical_path) {
             ProbeState::Idle => {}
             ProbeState::Busy(processes) => {
@@ -2045,6 +2411,13 @@ struct Preflight {
     requires_yellow_confirmation: bool,
 }
 
+fn default_measurement() -> String {
+    "unknown".into()
+}
+
+/// `status`: deleted | completed | partial | recreated | skipped | error | unknown.
+/// `measurement`: allocated (du before the effect) | scanEstimate (the scan's
+/// size, used when du timed out) | unknown.
 #[derive(Clone, Deserialize, Serialize)]
 struct CandidateOutcome {
     id: String,
@@ -2052,14 +2425,72 @@ struct CandidateOutcome {
     status: String,
     detail: String,
     freed: u64,
+    /// Bytes still present after a failed or partial removal; 0 otherwise.
+    #[serde(default)]
+    remaining: u64,
+    #[serde(default = "default_measurement")]
+    measurement: String,
+    /// Admission reason (same vocabulary as `Admission.reason_code`);
+    /// `allowed` for every outcome whose effect was attempted.
+    #[serde(default = "default_outcome_reason")]
+    reason_code: String,
+    #[serde(default)]
+    owner: String,
+}
+
+fn default_outcome_reason() -> String {
+    "allowed".into()
+}
+
+impl CandidateOutcome {
+    fn without_effect(id: &str, path: &Path, status: &str, detail: String) -> Self {
+        Self {
+            id: id.into(),
+            path: path.to_string_lossy().to_string(),
+            status: status.into(),
+            detail,
+            freed: 0,
+            remaining: 0,
+            measurement: default_measurement(),
+            reason_code: default_outcome_reason(),
+            owner: String::new(),
+        }
+    }
+
+    fn for_candidate(mut self, candidate: &CandidateInternal) -> Self {
+        self.owner = candidate.owner.clone();
+        self
+    }
+
+    fn skipped(candidate: &CandidateInternal, admission: Admission) -> Self {
+        Self {
+            reason_code: admission.reason_code,
+            ..Self::without_effect(
+                &candidate.id,
+                &candidate.canonical_path,
+                "skipped",
+                admission.detail,
+            )
+            .for_candidate(candidate)
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct CleanResult {
     run_id: Option<String>,
     record_error: Option<String>,
+    /// Sum of what Deslop removed by its own accounting (deleted, partial and
+    /// recreated outcomes).
     freed: u64,
     freed_size_unknown: bool,
+    /// Free space of the home volume before the first and after the last
+    /// effect. `None` when the volume could not be measured. The delta can
+    /// differ from `freed`: APFS snapshots and files held open by running
+    /// applications keep blocks allocated after an unlink.
+    free_space_before: Option<u64>,
+    free_space_after: Option<u64>,
+    free_space_delta: Option<i64>,
     outcomes: Vec<CandidateOutcome>,
     deleted: Vec<String>,
     skipped: Vec<String>,
@@ -2101,6 +2532,12 @@ struct RunRecord {
     #[serde(default)]
     actions: Vec<RunAction>,
     outcomes: Vec<CandidateOutcome>,
+    #[serde(default)]
+    free_space_before: Option<u64>,
+    #[serde(default)]
+    free_space_after: Option<u64>,
+    #[serde(default)]
+    free_space_delta: Option<i64>,
 }
 
 fn app_data_dir(home: &Path) -> PathBuf {
@@ -2220,8 +2657,8 @@ fn add_cleanup_exclusion(
         == Some(candidate.rule_id.as_str());
     let selected_project_scope = candidate.project_root.is_some()
         && validate_project_artifact(&candidate, &engine.home).is_ok();
-    let native_tool_scope = candidate.native_tool.is_some()
-        && validate_native_tool(&candidate, &engine.home).is_ok();
+    let native_tool_scope =
+        candidate.native_tool.is_some() && validate_native_tool(&candidate, &engine.home).is_ok();
     if !exact_owned_scope && !selected_project_scope && !native_tool_scope {
         return Err("an exclusion may only protect an exact owned cache candidate".into());
     }
@@ -2311,6 +2748,9 @@ impl RunJournal {
                 errors: 0,
                 actions: Vec::new(),
                 outcomes: Vec::new(),
+                free_space_before: None,
+                free_space_after: None,
+                free_space_delta: None,
             },
         };
         persist_run_record(home, &journal.record)?;
@@ -2345,7 +2785,8 @@ impl RunJournal {
             .find(|action| action.candidate_id == outcome.id && action.status == "intended")
         {
             action.status = match outcome.status.as_str() {
-                "deleted" | "completed" => "completed",
+                "deleted" | "completed" | "recreated" => "completed",
+                "partial" => "partial",
                 "skipped" => "skipped",
                 "error" => "error",
                 _ => "unknown",
@@ -2363,6 +2804,9 @@ impl RunJournal {
         self.record.status = "completed".into();
         self.record.freed = result.freed;
         self.record.freed_size_unknown = result.freed_size_unknown;
+        self.record.free_space_before = result.free_space_before;
+        self.record.free_space_after = result.free_space_after;
+        self.record.free_space_delta = result.free_space_delta;
         self.record.deleted = result.deleted.len();
         self.record.skipped = result.skipped.len();
         self.record.errors = result.errors.len();
@@ -2406,6 +2850,19 @@ struct VolumeStats {
     id: String,
     total: u64,
     free: u64,
+}
+
+/// Free bytes of the volume holding `path`, or `None` when it could not be
+/// measured (never a fabricated 0).
+fn free_space(path: &Path) -> Option<u64> {
+    let volume = volume_stats(path);
+    (volume.id != "unknown").then_some(volume.free)
+}
+
+fn free_space_delta(before: Option<u64>, after: Option<u64>) -> Option<i64> {
+    let before = i64::try_from(before?).ok()?;
+    let after = i64::try_from(after?).ok()?;
+    after.checked_sub(before)
 }
 
 #[cfg(windows)]
@@ -2460,16 +2917,10 @@ fn volume_stats(path: &Path) -> VolumeStats {
 #[tauri::command]
 fn default_roots(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
     let home = &state.home;
-    let raw: Vec<String> = [
-        "Documents",
-        "Documents/VIBE BUILD",
-        "Developer",
-        "code",
-        "Projects",
-    ]
-    .iter()
-    .map(|part| home.join(part).to_string_lossy().to_string())
-    .collect();
+    let raw: Vec<String> = ["Documents", "Developer", "code", "Projects"]
+        .iter()
+        .map(|part| home.join(part).to_string_lossy().to_string())
+        .collect();
     let (roots, _) = canonical_roots(&raw, home);
     Ok(roots
         .into_iter()
@@ -2735,6 +3186,7 @@ fn create_preflight_with_probe(
             reason: candidate.reason.clone(),
             scope: candidate.scope.clone(),
             restore: candidate.restore.clone(),
+            tier: candidate.tier,
         });
     }
     let id = state.next_id("preflight");
@@ -2826,7 +3278,9 @@ fn clean_engine_with_probe(
     // fail closed rather than creating an un-auditable deletion.
     let mut journal =
         RunJournal::begin(&state.home, state.counter.fetch_add(1, Ordering::Relaxed))?;
-    let mut freed = 0;
+    // The volume delta is reported next to Deslop's own accounting so the
+    // user can see snapshot/open-file effects instead of trusting one number.
+    let free_space_before = free_space(&state.home);
     let mut freed_size_unknown = false;
     let mut outcomes = Vec::new();
     let mut deleted = Vec::new();
@@ -2839,15 +3293,8 @@ fn clean_engine_with_probe(
         let path = candidate.canonical_path.clone();
         let admission = candidate_admission(candidate, &state.home, &state.exclusions, probe);
         if admission.state != "allowed" {
-            let detail = admission.detail;
-            skipped.push(format!("{} — {detail}", path.display()));
-            let outcome = CandidateOutcome {
-                id: id.clone(),
-                path: path.to_string_lossy().to_string(),
-                status: "skipped".into(),
-                detail,
-                freed: 0,
-            };
+            skipped.push(format!("{} — {}", path.display(), admission.detail));
+            let outcome = CandidateOutcome::skipped(candidate, admission);
             if let Err(error) = journal.record_outcome(&state.home, outcome.clone()) {
                 record_error = Some(error);
                 outcomes.push(CandidateOutcome {
@@ -2860,21 +3307,25 @@ fn clean_engine_with_probe(
             outcomes.push(outcome);
             continue;
         }
-        let bytes = du_bytes(&path);
+        // Allocated size immediately before the effect. A timed-out `du`
+        // falls back to the size the scan already measured instead of
+        // reporting 0 B for data that is really removed (F-05).
+        let (before, measurement) = if candidate.action == ActionMethod::NativeTool {
+            (None, "unknown")
+        } else {
+            match probe.allocated_bytes(&path) {
+                Some(bytes) => (Some(bytes), "allocated"),
+                None if candidate.size_known => (Some(candidate.size), "scanEstimate"),
+                None => (None, "unknown"),
+            }
+        };
         // Measurement can take long enough for a concurrent rename,
         // application start, or database open. Re-run the *entire* admission
         // and identity policy at the final action boundary.
         let final_admission = candidate_admission(candidate, &state.home, &state.exclusions, probe);
         if final_admission.state != "allowed" {
-            let detail = final_admission.detail;
-            skipped.push(format!("{} — {detail}", path.display()));
-            let outcome = CandidateOutcome {
-                id: id.clone(),
-                path: path.to_string_lossy().to_string(),
-                status: "skipped".into(),
-                detail,
-                freed: 0,
-            };
+            skipped.push(format!("{} — {}", path.display(), final_admission.detail));
+            let outcome = CandidateOutcome::skipped(candidate, final_admission);
             if let Err(error) = journal.record_outcome(&state.home, outcome.clone()) {
                 record_error = Some(error);
                 outcomes.push(CandidateOutcome {
@@ -2895,99 +3346,105 @@ fn clean_engine_with_probe(
             let detail = "cleanup journal could not persist the action intent; nothing was deleted"
                 .to_string();
             errors.push(format!("{} — {detail}", path.display()));
+            outcomes.push(
+                CandidateOutcome::without_effect(id, &path, "error", detail)
+                    .for_candidate(candidate),
+            );
+            break;
+        }
+        let outcome = match candidate.action {
+            ActionMethod::NativeTool => match execute_native_tool(candidate) {
+                Ok(()) => CandidateOutcome {
+                    detail: "The installed tool completed its own prune operation; released space is not estimated.".into(),
+                    ..CandidateOutcome::without_effect(id, &path, "completed", String::new())
+                },
+                Err(detail) => CandidateOutcome::without_effect(id, &path, "error", detail),
+            },
+            ActionMethod::Manual => CandidateOutcome::without_effect(
+                id,
+                &path,
+                "error",
+                "manual-only candidates cannot be executed".into(),
+            ),
+            ActionMethod::Delete => {
+                let result = remove_authorized_candidate(&path, candidate.identity.is_dir)
+                    .map_err(|error| error.to_string());
+                let remeasure = |remaining: &Path| {
+                    if measurement == "allocated" {
+                        probe.allocated_bytes(remaining)
+                    } else {
+                        walk_size(remaining)
+                    }
+                };
+                let report = classify_removal(&path, result, before, &remeasure);
+                CandidateOutcome {
+                    id: id.clone(),
+                    path: path.to_string_lossy().to_string(),
+                    status: report.status.into(),
+                    detail: report.detail,
+                    freed: report.freed,
+                    remaining: report.remaining,
+                    measurement: measurement.into(),
+                    reason_code: default_outcome_reason(),
+                    owner: candidate.owner.clone(),
+                }
+            }
+        };
+        let outcome = outcome.for_candidate(candidate);
+        if let Err(error) = journal.record_outcome(&state.home, outcome.clone()) {
+            // The filesystem effect may have completed, but it is not safe
+            // to report it as a confirmed result without its journal record.
+            // Do not process later candidates.
+            record_error = Some(error);
+            freed_size_unknown = true;
+            errors.push(format!(
+                "{} — cleanup outcome is unknown because the journal write failed",
+                path.display()
+            ));
             outcomes.push(CandidateOutcome {
-                id: id.clone(),
-                path: path.to_string_lossy().to_string(),
-                status: "error".into(),
-                detail,
+                status: "unknown".into(),
+                detail:
+                    "The action may have completed, but its journal result could not be written."
+                        .into(),
                 freed: 0,
+                remaining: 0,
+                ..outcome
             });
             break;
         }
-        let result = match candidate.action {
-            ActionMethod::Delete => remove_authorized_candidate(&path, candidate.identity.is_dir)
-                .map_err(|error| error.to_string()),
-            ActionMethod::NativeTool => execute_native_tool(candidate),
-            ActionMethod::Manual => Err("manual-only candidates cannot be executed".into()),
-        };
-        match result {
-            Ok(()) => {
-                let known_outcome = CandidateOutcome {
-                    id: id.clone(),
-                    path: path.to_string_lossy().to_string(),
-                    status: if candidate.action == ActionMethod::NativeTool {
-                        "completed".into()
-                    } else {
-                        "deleted".into()
-                    },
-                    detail: if candidate.action == ActionMethod::NativeTool {
-                        "The installed tool completed its own prune operation; released space is not estimated.".into()
-                    } else if bytes.is_some() {
-                        "deleted after safety and identity revalidation".into()
-                    } else {
-                        "deleted after safety and identity revalidation; removed size was not measured".into()
-                    },
-                    freed: if candidate.action == ActionMethod::NativeTool {
-                        0
-                    } else {
-                        bytes.unwrap_or(0)
-                    },
-                };
-                if let Err(error) = journal.record_outcome(&state.home, known_outcome.clone()) {
-                    // The filesystem effect completed, but it is not safe to
-                    // report it as a confirmed success without its result
-                    // record. Do not process later candidates.
-                    record_error = Some(error);
+        match outcome.status.as_str() {
+            "deleted" | "recreated" => {
+                if outcome.measurement == "unknown" {
                     freed_size_unknown = true;
-                    errors.push(format!(
-                        "{} — cleanup outcome is unknown because the journal write failed",
-                        path.display()
-                    ));
-                    outcomes.push(CandidateOutcome { status: "unknown".into(), detail: "The deletion may have completed, but its journal result could not be written.".into(), freed: 0, ..known_outcome });
-                    break;
                 }
-                if candidate.action == ActionMethod::NativeTool {
-                    freed_size_unknown = true;
-                } else if let Some(bytes) = bytes {
-                    freed += bytes;
-                    deleted.push(path.to_string_lossy().to_string());
-                } else {
-                    freed_size_unknown = true;
-                    deleted.push(path.to_string_lossy().to_string());
-                }
-                if let Some(hint) = &candidate.restore {
-                    reinstall.insert(path.to_string_lossy().to_string(), hint.clone());
-                }
-                outcomes.push(known_outcome);
+                deleted.push(outcome.path.clone());
             }
-            Err(error) => {
-                let detail = error.to_string();
-                errors.push(format!("{} — {detail}", path.display()));
-                let outcome = CandidateOutcome {
-                    id: id.clone(),
-                    path: path.to_string_lossy().to_string(),
-                    status: "error".into(),
-                    detail,
-                    freed: 0,
-                };
-                if let Err(error) = journal.record_outcome(&state.home, outcome.clone()) {
-                    record_error = Some(error);
-                    outcomes.push(CandidateOutcome {
-                        status: "unknown".into(),
-                        detail: "cleanup outcome could not be written to the journal".into(),
-                        ..outcome
-                    });
-                    break;
-                }
-                outcomes.push(outcome);
+            "partial" | "error" => errors.push(format!("{} — {}", path.display(), outcome.detail)),
+            _ => {}
+        }
+        if matches!(
+            outcome.status.as_str(),
+            "deleted" | "recreated" | "partial" | "completed"
+        ) {
+            if let Some(hint) = &candidate.restore {
+                reinstall.insert(outcome.path.clone(), hint.clone());
             }
         }
+        outcomes.push(outcome);
     }
+    let freed = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome.status.as_str(), "deleted" | "partial" | "recreated"))
+        .fold(0u64, |total, outcome| total.saturating_add(outcome.freed));
+    let free_space_after = free_space(&state.home);
     let mut result = CleanResult {
         run_id: Some(journal.record.id.clone()),
         record_error,
         freed,
         freed_size_unknown,
+        free_space_before,
+        free_space_after,
+        free_space_delta: free_space_delta(free_space_before, free_space_after),
         outcomes,
         deleted,
         skipped,
@@ -3000,6 +3457,68 @@ fn clean_engine_with_probe(
         }
     }
     Ok(result)
+}
+
+/// What a delete effect actually achieved, judged from the filesystem after
+/// it returned rather than from its return value alone.
+struct RemovalReport {
+    status: &'static str,
+    detail: String,
+    freed: u64,
+    remaining: u64,
+}
+
+/// `remove_dir_all` stops at the first failure without restoring what it
+/// already removed (F-07), and a running application may recreate its cache
+/// a moment after a successful removal (F-08). Both are reported as such.
+fn classify_removal(
+    path: &Path,
+    result: Result<(), String>,
+    before: Option<u64>,
+    remeasure: &dyn Fn(&Path) -> Option<u64>,
+) -> RemovalReport {
+    let still_exists = fs::symlink_metadata(path).is_ok();
+    match result {
+        Ok(()) if still_exists => RemovalReport {
+            status: "recreated",
+            detail: "the owning application recreated this cache immediately".into(),
+            freed: before.unwrap_or(0),
+            remaining: 0,
+        },
+        Ok(()) => RemovalReport {
+            status: "deleted",
+            detail: if before.is_some() {
+                "deleted after safety and identity revalidation".into()
+            } else {
+                "deleted after safety and identity revalidation; removed size was not measured"
+                    .into()
+            },
+            freed: before.unwrap_or(0),
+            remaining: 0,
+        },
+        Err(error) if !still_exists => RemovalReport {
+            status: "deleted",
+            detail: format!("deleted; the system also reported: {error}"),
+            freed: before.unwrap_or(0),
+            remaining: 0,
+        },
+        Err(error) => match (before, remeasure(path)) {
+            (Some(before), Some(remaining)) if remaining < before => RemovalReport {
+                status: "partial",
+                detail: format!(
+                    "partially removed; {remaining} bytes remain because the system reported: {error}"
+                ),
+                freed: before - remaining,
+                remaining,
+            },
+            _ => RemovalReport {
+                status: "error",
+                detail: error,
+                freed: 0,
+                remaining: 0,
+            },
+        },
+    }
 }
 
 #[tauri::command]
@@ -4337,7 +4856,7 @@ mod tests {
             .all(|entry| entry.state == "busy"));
         let unknown = FakeProbe {
             owner: ProbeState::Unknown {
-                reason_code: "probe_timeout",
+                reason_code: "process_probe_timeout",
                 detail: "timed out".into(),
             },
             sqlite: ProbeState::Idle,
@@ -4382,6 +4901,8 @@ mod tests {
         let result = clean_engine_with_probe(&mut state, preflight.id, false, &busy).unwrap();
         assert!(result.deleted.is_empty());
         assert_eq!(result.outcomes[0].status, "skipped");
+        assert_eq!(result.outcomes[0].reason_code, "owner_running");
+        assert_eq!(result.outcomes[0].owner, "Cursor");
         assert!(path.exists());
         fs::remove_dir_all(home).unwrap();
     }
@@ -4458,11 +4979,11 @@ mod tests {
     fn sqlite_families_require_the_main_database_and_include_wal_shm() {
         let root = fixture();
         fs::write(root.join("old.db-shm"), b"old").unwrap();
-        assert!(sqlite_families(&root).unwrap().is_empty());
+        assert!(sqlite_families(&root).is_empty());
         fs::write(root.join("active.sqlite"), b"db").unwrap();
         fs::write(root.join("active.sqlite-wal"), b"wal").unwrap();
         fs::write(root.join("active.sqlite-shm"), b"shm").unwrap();
-        let families = sqlite_families(&root).unwrap();
+        let families = sqlite_families(&root);
         assert_eq!(families.len(), 1);
         assert_eq!(families[0].len(), 3);
         fs::remove_dir_all(root).unwrap();
@@ -4515,6 +5036,9 @@ mod tests {
             skipped: 0,
             errors: 0,
             outcomes: Vec::new(),
+            free_space_before: None,
+            free_space_after: None,
+            free_space_delta: None,
             actions: vec![RunAction {
                 candidate_id: "candidate".into(),
                 path: "/fixture".into(),
@@ -5171,5 +5695,661 @@ mod tests {
         assert!(paths.contains(&cache));
         assert!(!paths.contains(&cookies));
         fs::remove_dir_all(home).unwrap();
+    }
+
+    /// The exact set the frontend maps to translated reasons (T5).
+    const STABLE_REASON_CODES: &[&str] = &[
+        "allowed",
+        "identity_or_scope_changed",
+        "excluded",
+        "manual_only",
+        "owner_running",
+        "singleton_lock_live",
+        "sqlite_in_use",
+        "process_probe_unavailable",
+        "process_probe_timeout",
+        "process_probe_unsupported",
+        "sqlite_probe_unavailable",
+        "sqlite_probe_timeout",
+        "lock_unreadable",
+    ];
+
+    fn assert_stable_reason(admission: &Admission) {
+        assert!(
+            STABLE_REASON_CODES.contains(&admission.reason_code.as_str()),
+            "unexpected reason code {}",
+            admission.reason_code
+        );
+    }
+
+    fn electron_candidate(home: &Path, app: &str) -> CandidateInternal {
+        let cache = home.join(format!("Library/Application Support/{app}/Cache"));
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("data_0"), b"cache").unwrap();
+        let mut candidate = fixture_candidate(cache, "editors");
+        candidate.owner = app.into();
+        candidate.required_probe = ProbeRequirement::OwnerAndSqlite;
+        candidate
+    }
+
+    #[cfg(unix)]
+    fn write_singleton_lock(home: &Path, app: &str, target: &str) {
+        let lock = home.join(format!("Library/Application Support/{app}/SingletonLock"));
+        let _ = fs::remove_file(&lock);
+        std::os::unix::fs::symlink(target, &lock).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn dead_pid() -> u32 {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn cache_with_thousands_of_files_is_admitted_without_a_full_walk() {
+        struct SystemSqliteProbe;
+        impl SafetyProbe for SystemSqliteProbe {
+            fn owner_state(&self, _owner: &str) -> ProbeState {
+                ProbeState::Idle
+            }
+            fn sqlite_state(&self, candidate: &Path) -> ProbeState {
+                system_sqlite_state(candidate)
+            }
+        }
+        let home = fixture();
+        let mut state = engine(&home);
+        let candidate = electron_candidate(&state.home, "Cursor");
+        let data = candidate.canonical_path.join("Cache_Data");
+        fs::create_dir_all(&data).unwrap();
+        for index in 0..3_000 {
+            fs::write(data.join(format!("f_{index:06x}")), b"x").unwrap();
+        }
+        // A database deep inside the cache tree is out of the bounded probe.
+        let deep = candidate.canonical_path.join("a/b/c");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("index.db"), b"db").unwrap();
+        assert!(sqlite_families(&candidate.canonical_path).is_empty());
+        let admission = candidate_admission(
+            &candidate,
+            &state.home,
+            &state.exclusions,
+            &SystemSqliteProbe,
+        );
+        assert_eq!(admission.state, "allowed");
+        assert_eq!(admission.owner, "Cursor");
+        let id = candidate.id.clone();
+        let snapshot_id = snapshot_with_candidate(&mut state, candidate);
+        let preflight =
+            create_preflight_with_probe(&mut state, snapshot_id, vec![id], &SystemSqliteProbe)
+                .unwrap();
+        assert_eq!(preflight.entries.len(), 1);
+        assert!(preflight.blocked_entries.is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn sqlite_discovery_stops_at_its_bound_without_failing() {
+        let root = fixture();
+        for index in 0..2_500 {
+            fs::write(root.join(format!("entry-{index}")), b"x").unwrap();
+        }
+        fs::write(root.join("profile.sqlite"), b"db").unwrap();
+        // Reaching the bound is "checked what we could", never an error.
+        let families = sqlite_families(&root);
+        assert!(families.len() <= 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_singleton_lock_blocks_and_dead_pid_lock_admits() {
+        let home = fixture();
+        let state = engine(&home);
+        let candidate = electron_candidate(&state.home, "Cursor");
+        write_singleton_lock(
+            &state.home,
+            "Cursor",
+            &format!("build-host.local-{}", std::process::id()),
+        );
+        let admission = candidate_admission(
+            &candidate,
+            &state.home,
+            &state.exclusions,
+            &FakeProbe::idle(),
+        );
+        assert_eq!(admission.state, "busy");
+        assert_eq!(admission.reason_code, "singleton_lock_live");
+        assert_eq!(admission.owner, "Cursor");
+        assert_stable_reason(&admission);
+
+        write_singleton_lock(
+            &state.home,
+            "Cursor",
+            &format!("build-host.local-{}", dead_pid()),
+        );
+        let admission = candidate_admission(
+            &candidate,
+            &state.home,
+            &state.exclusions,
+            &FakeProbe::idle(),
+        );
+        assert_eq!(admission.state, "allowed");
+        assert_stable_reason(&admission);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_singleton_lock_is_unknown() {
+        let home = fixture();
+        let state = engine(&home);
+        let candidate = electron_candidate(&state.home, "Slack");
+        write_singleton_lock(&state.home, "Slack", "no-pid-here");
+        let admission = candidate_admission(
+            &candidate,
+            &state.home,
+            &state.exclusions,
+            &FakeProbe::idle(),
+        );
+        assert_eq!(admission.state, "unknown");
+        assert_eq!(admission.reason_code, "lock_unreadable");
+        assert_eq!(admission.owner, "Slack");
+        assert_stable_reason(&admission);
+
+        // A regular file is not a Chromium lock either.
+        let lock = state
+            .home
+            .join("Library/Application Support/Slack/SingletonLock");
+        fs::remove_file(&lock).unwrap();
+        fs::write(&lock, b"").unwrap();
+        let admission = candidate_admission(
+            &candidate,
+            &state.home,
+            &state.exclusions,
+            &FakeProbe::idle(),
+        );
+        assert_eq!(admission.reason_code, "lock_unreadable");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn singleton_lock_target_parsing_takes_the_last_field() {
+        assert_eq!(parse_singleton_lock_target("my-mac.local-4321"), Some(4321));
+        assert_eq!(parse_singleton_lock_target("host-0"), None);
+        assert_eq!(parse_singleton_lock_target("4321"), None);
+        assert_eq!(parse_singleton_lock_target("host-abc"), None);
+    }
+
+    #[test]
+    fn admission_reason_codes_come_from_the_stable_set() {
+        let home = fixture();
+        let state = engine(&home);
+        let candidate = electron_candidate(&state.home, "Code");
+        let probes = [
+            (
+                FakeProbe {
+                    owner: ProbeState::Busy(vec!["Code".into()]),
+                    sqlite: ProbeState::Idle,
+                },
+                "owner_running",
+            ),
+            (
+                FakeProbe {
+                    owner: ProbeState::Idle,
+                    sqlite: ProbeState::Busy(vec!["Code Helper".into()]),
+                },
+                "sqlite_in_use",
+            ),
+            (
+                FakeProbe {
+                    owner: ProbeState::Idle,
+                    sqlite: ProbeState::Unknown {
+                        reason_code: "sqlite_probe_timeout",
+                        detail: "timed out".into(),
+                    },
+                },
+                "sqlite_probe_timeout",
+            ),
+            (FakeProbe::idle(), "allowed"),
+        ];
+        for (probe, expected) in probes {
+            let admission = candidate_admission(&candidate, &state.home, &state.exclusions, &probe);
+            assert_eq!(admission.reason_code, expected);
+            assert_eq!(admission.owner, "Code");
+            assert_stable_reason(&admission);
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn generic_runtimes_never_block_package_caches() {
+        for owner in ["npm", "pnpm", "Project Node build"] {
+            assert!(!process_names_for_owner(owner).contains(&"node"));
+        }
+        for owner in ["uv", "pip", "Hugging Face"] {
+            let names = process_names_for_owner(owner);
+            assert!(!names.contains(&"python") && !names.contains(&"python3"));
+        }
+        assert!(process_names_for_owner("npm").contains(&"npm"));
+        assert!(process_names_for_owner("Project Node build").contains(&"yarn"));
+
+        // A probe that reports `node` running whenever the owner would have
+        // listed it: the npm cache must still be admitted.
+        struct NodeRunningProbe;
+        impl SafetyProbe for NodeRunningProbe {
+            fn owner_state(&self, owner: &str) -> ProbeState {
+                if process_names_for_owner(owner).contains(&"node") {
+                    ProbeState::Busy(vec!["node".into()])
+                } else {
+                    ProbeState::Idle
+                }
+            }
+            fn sqlite_state(&self, _candidate: &Path) -> ProbeState {
+                ProbeState::Idle
+            }
+        }
+        let home = fixture();
+        let path = home.join(".npm/_cacache");
+        fs::create_dir_all(&path).unwrap();
+        let state = engine(&home);
+        let mut candidate = fixture_candidate(path, "pkg");
+        candidate.owner = "npm".into();
+        candidate.required_probe = ProbeRequirement::Owner;
+        let admission = candidate_admission(
+            &candidate,
+            &state.home,
+            &state.exclusions,
+            &NodeRunningProbe,
+        );
+        assert_eq!(admission.state, "allowed");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn windows_owner_images_and_tasklist_rows_are_parsed() {
+        assert!(windows_image_names_for_owner("npm").is_empty());
+        for owner in [
+            "Cursor",
+            "Code",
+            "Slack",
+            "npm",
+            "pnpm",
+            "uv",
+            "pip",
+            "Project Node build",
+        ] {
+            assert!(!windows_image_names_for_owner(owner).contains(&"node.exe"));
+        }
+        assert_eq!(windows_image_names_for_owner("Code"), ["Code.exe"]);
+        let row = "\"Code.exe\",\"1234\",\"Console\",\"1\",\"120,000 K\"\r\n";
+        assert!(tasklist_lists_image(row, "Code.exe"));
+        assert!(tasklist_lists_image(row, "code.exe"));
+        assert!(!tasklist_lists_image(row, "Cursor.exe"));
+        assert!(!tasklist_lists_image(
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            "Code.exe"
+        ));
+        assert!(!tasklist_lists_image("", "Code.exe"));
+    }
+
+    #[test]
+    fn du_timeout_falls_back_to_the_scan_estimate() {
+        struct NoDuProbe;
+        impl SafetyProbe for NoDuProbe {
+            fn owner_state(&self, _owner: &str) -> ProbeState {
+                ProbeState::Idle
+            }
+            fn sqlite_state(&self, _candidate: &Path) -> ProbeState {
+                ProbeState::Idle
+            }
+            fn allocated_bytes(&self, _path: &Path) -> Option<u64> {
+                None
+            }
+        }
+        let home = fixture();
+        let path = home.join("cache");
+        fs::write(&path, b"data").unwrap();
+        let mut state = engine(&home);
+        let mut candidate = fixture_candidate(path.clone(), "pkg");
+        candidate.size = 4_096;
+        candidate.size_known = true;
+        let id = candidate.id.clone();
+        let snapshot_id = snapshot_with_candidate(&mut state, candidate);
+        let preflight =
+            create_preflight_with_probe(&mut state, snapshot_id, vec![id], &NoDuProbe).unwrap();
+        let result = clean_engine_with_probe(&mut state, preflight.id, false, &NoDuProbe).unwrap();
+        assert!(!path.exists());
+        assert_eq!(result.outcomes[0].status, "deleted");
+        assert_eq!(result.outcomes[0].measurement, "scanEstimate");
+        assert_eq!(result.outcomes[0].freed, 4_096);
+        assert_eq!(result.freed, 4_096);
+        assert!(!result.freed_size_unknown);
+
+        fs::write(&path, b"data").unwrap();
+        let mut candidate = fixture_candidate(path.clone(), "pkg");
+        candidate.size_known = false;
+        let id = candidate.id.clone();
+        let snapshot_id = snapshot_with_candidate(&mut state, candidate);
+        let preflight =
+            create_preflight_with_probe(&mut state, snapshot_id, vec![id], &NoDuProbe).unwrap();
+        let result = clean_engine_with_probe(&mut state, preflight.id, false, &NoDuProbe).unwrap();
+        assert_eq!(result.outcomes[0].measurement, "unknown");
+        assert_eq!(result.freed, 0);
+        assert!(result.freed_size_unknown);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_removal_reports_freed_and_remaining_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The first measurement is inflated so the result does not depend on
+        // the order in which `remove_dir_all` visits the two children.
+        struct InflatedBeforeProbe {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl SafetyProbe for InflatedBeforeProbe {
+            fn owner_state(&self, _owner: &str) -> ProbeState {
+                ProbeState::Idle
+            }
+            fn sqlite_state(&self, _candidate: &Path) -> ProbeState {
+                ProbeState::Idle
+            }
+            fn allocated_bytes(&self, path: &Path) -> Option<u64> {
+                if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Some(64 * 1024 * 1024)
+                } else {
+                    du_bytes(path)
+                }
+            }
+        }
+        let home = fixture();
+        let cache = home.join("cache");
+        let locked = cache.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(cache.join("removable.bin"), [1u8; 64 * 1024]).unwrap();
+        fs::write(locked.join("kept.bin"), [2u8; 16 * 1024]).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        let mut state = engine(&home);
+        let candidate = fixture_candidate(cache.clone(), "pkg");
+        let id = candidate.id.clone();
+        let snapshot_id = snapshot_with_candidate(&mut state, candidate);
+        let probe = InflatedBeforeProbe {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let preflight =
+            create_preflight_with_probe(&mut state, snapshot_id, vec![id], &probe).unwrap();
+        let result = clean_engine_with_probe(&mut state, preflight.id, false, &probe).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        if result.outcomes[0].status == "deleted" {
+            eprintln!("SKIP: directory permissions are not enforced for this user");
+            fs::remove_dir_all(home).unwrap();
+            return;
+        }
+        let outcome = &result.outcomes[0];
+        assert_eq!(outcome.status, "partial");
+        assert_eq!(outcome.measurement, "allocated");
+        assert!(outcome.remaining > 0);
+        assert!(outcome.freed > 0);
+        assert_eq!(outcome.freed + outcome.remaining, 64 * 1024 * 1024);
+        assert_eq!(result.freed, outcome.freed);
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.deleted.is_empty());
+        assert!(locked.join("kept.bin").exists());
+        let history = load_run_history(&state.home);
+        assert_eq!(history[0].actions[0].status, "partial");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn removal_classification_reports_recreated_deleted_and_error() {
+        let root = fixture();
+        let recreated = root.join("recreated");
+        fs::create_dir_all(&recreated).unwrap();
+        let report = classify_removal(&recreated, Ok(()), Some(1_000), &|_: &Path| Some(0_u64));
+        assert_eq!(report.status, "recreated");
+        assert_eq!(report.freed, 1_000);
+        assert_eq!(
+            report.detail,
+            "the owning application recreated this cache immediately"
+        );
+
+        let gone = root.join("gone");
+        let report = classify_removal(&gone, Ok(()), Some(500), &|_: &Path| Some(0_u64));
+        assert_eq!(report.status, "deleted");
+        assert_eq!(report.freed, 500);
+        let report = classify_removal(&gone, Err("busy".into()), Some(500), &|_: &Path| {
+            Some(0_u64)
+        });
+        assert_eq!(report.status, "deleted");
+
+        let report = classify_removal(&recreated, Err("denied".into()), Some(500), &|_: &Path| {
+            Some(500_u64)
+        });
+        assert_eq!(report.status, "error");
+        assert_eq!(report.freed, 0);
+        assert_eq!(report.remaining, 0);
+        let report = classify_removal(&recreated, Err("denied".into()), Some(500), &|_: &Path| {
+            Some(200_u64)
+        });
+        assert_eq!(report.status, "partial");
+        assert_eq!((report.freed, report.remaining), (300, 200));
+        let report = classify_removal(&recreated, Err("denied".into()), None, &|_: &Path| {
+            Some(200_u64)
+        });
+        assert_eq!(report.status, "error");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clean_result_reports_free_space_before_and_after() {
+        let home = fixture();
+        let path = home.join("cache");
+        fs::write(&path, [0u8; 8 * 1024]).unwrap();
+        let mut state = engine(&home);
+        let candidate = fixture_candidate(path, "pkg");
+        let id = candidate.id.clone();
+        let snapshot_id = snapshot_with_candidate(&mut state, candidate);
+        let preflight =
+            create_preflight_with_probe(&mut state, snapshot_id, vec![id], &FakeProbe::idle())
+                .unwrap();
+        let result =
+            clean_engine_with_probe(&mut state, preflight.id, false, &FakeProbe::idle()).unwrap();
+        assert!(result.free_space_before.is_some());
+        assert!(result.free_space_after.is_some());
+        assert_eq!(
+            result.free_space_delta,
+            free_space_delta(result.free_space_before, result.free_space_after)
+        );
+        assert!(result.free_space_delta.is_some());
+        let json = serde_json::to_value(&result).unwrap();
+        for key in ["free_space_before", "free_space_after", "free_space_delta"] {
+            assert!(json.get(key).is_some(), "missing {key}");
+        }
+        let outcome = &json["outcomes"][0];
+        assert!(outcome.get("remaining").is_some());
+        assert_eq!(outcome["measurement"], "allocated");
+        assert_eq!(outcome["reason_code"], "allowed");
+        assert_eq!(outcome["owner"], "Package tools");
+        let history = load_run_history(&state.home);
+        assert_eq!(history[0].schema_version, 3);
+        assert_eq!(history[0].free_space_before, result.free_space_before);
+        assert_eq!(free_space_delta(Some(10), Some(4)), Some(-6));
+        assert_eq!(free_space_delta(None, Some(4)), None);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn journal_maps_partial_and_recreated_outcomes() {
+        let home = fixture();
+        let path = home.join("cache");
+        fs::write(&path, b"x").unwrap();
+        let candidate = fixture_candidate(path.clone(), "pkg");
+        let mut journal = RunJournal::begin(&home, 1).unwrap();
+        journal.intent(&home, &candidate).unwrap();
+        journal
+            .record_outcome(
+                &home,
+                CandidateOutcome::without_effect(&candidate.id, &path, "partial", "x".into()),
+            )
+            .unwrap();
+        journal.intent(&home, &candidate).unwrap();
+        journal
+            .record_outcome(
+                &home,
+                CandidateOutcome::without_effect(&candidate.id, &path, "recreated", "x".into()),
+            )
+            .unwrap();
+        assert_eq!(journal.record.actions[0].status, "partial");
+        assert_eq!(journal.record.actions[1].status, "completed");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn version_two_run_records_still_load() {
+        let home = fixture();
+        let runs = runs_dir(&home);
+        fs::create_dir_all(&runs).unwrap();
+        let legacy = r#"{"id":"run-v2","schema_version":2,"policy_fingerprint":"2026-09-25-snapshot-v2","started_at":1,"completed_at":2,"status":"completed","freed":10,"freed_size_unknown":false,"deleted":1,"skipped":0,"errors":0,"actions":[],"outcomes":[{"id":"c","path":"/p","status":"deleted","detail":"d","freed":10}]}"#;
+        fs::write(runs.join("run-v2.json"), legacy).unwrap();
+        let history = load_run_history(&home);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].schema_version, 2);
+        assert_eq!(history[0].free_space_delta, None);
+        assert_eq!(history[0].outcomes[0].remaining, 0);
+        assert_eq!(history[0].outcomes[0].measurement, "unknown");
+        assert_eq!(history[0].outcomes[0].reason_code, "allowed");
+        assert_eq!(history[0].outcomes[0].owner, "");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn expensive_package_paths_need_review_and_appcache_is_green() {
+        let home = Path::new("/Users/tester");
+        let pkg = rule_for_id("pkg").unwrap();
+        let playwright = home.join("Library/Caches/ms-playwright");
+        assert_eq!(candidate_tier(pkg, &playwright), Tier::Yellow);
+        assert_eq!(
+            candidate_reason(pkg, &playwright),
+            "installed browser binaries for Playwright; re-download required"
+        );
+        assert_eq!(
+            candidate_restore(pkg, &playwright).as_deref(),
+            Some("npx playwright install")
+        );
+        let jetbrains = home.join("Library/Caches/JetBrains");
+        assert_eq!(candidate_tier(pkg, &jetbrains), Tier::Yellow);
+        assert_eq!(
+            candidate_reason(pkg, &jetbrains),
+            "IDE indexes rebuild slowly"
+        );
+        assert_eq!(
+            candidate_tier(pkg, &home.join("Library/Caches/Homebrew")),
+            Tier::Green
+        );
+        assert_eq!(candidate_restore(pkg, &home.join(".npm/_cacache")), None);
+
+        let appcache = rule_for_id("appcache").unwrap();
+        assert_eq!(appcache.tier, Tier::Green);
+        assert_eq!(
+            candidate_tier(appcache, &home.join("Library/Caches/Arc")),
+            Tier::Green
+        );
+        assert_eq!(
+            candidate_tier(
+                appcache,
+                &home.join("Library/Application Support/Arc/User Data/Default/GPUCache")
+            ),
+            Tier::Green
+        );
+        let worker = home.join("Library/Application Support/Slack/Service Worker/CacheStorage");
+        assert_eq!(candidate_tier(appcache, &worker), Tier::Yellow);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn package_rule_skips_npx_and_app_rule_covers_both_openai_bundles() {
+        let home = fixture();
+        for relative in [
+            ".npm/_cacache",
+            ".npm/_npx",
+            "Library/Caches/com.openai.chat",
+            "Library/Caches/com.openai.codex",
+        ] {
+            fs::create_dir_all(home.join(relative)).unwrap();
+        }
+        let packages = rules::paths_for("pkg", &home);
+        assert!(packages.contains(&home.join(".npm/_cacache")));
+        assert!(!packages.contains(&home.join(".npm/_npx")));
+        let apps = rules::app_cache_paths(&home);
+        assert!(apps.contains(&home.join("Library/Caches/com.openai.chat")));
+        assert!(apps.contains(&home.join("Library/Caches/com.openai.codex")));
+        let appcache = rule_for_id("appcache").unwrap();
+        assert_eq!(
+            candidate_owner(
+                appcache,
+                &home.join("Library/Caches/com.openai.codex"),
+                &home
+            ),
+            "Codex"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn owner_detection_ignores_the_account_name() {
+        let appcache = rule_for_id("appcache").unwrap();
+        let pkg = rule_for_id("pkg").unwrap();
+        let editors = rule_for_id("editors").unwrap();
+        let marcus = Path::new("/Users/Marcus");
+        assert_eq!(
+            candidate_owner(
+                appcache,
+                &marcus.join("Library/Application Support/Slack/Cache"),
+                marcus
+            ),
+            "Slack"
+        );
+        assert_eq!(
+            candidate_owner(
+                appcache,
+                &marcus.join("Library/Caches/LarkInternational"),
+                marcus
+            ),
+            "Lark"
+        );
+        assert_eq!(
+            candidate_owner(pkg, &marcus.join("Library/Caches/Homebrew"), marcus),
+            "Homebrew"
+        );
+        let arcadia = Path::new("/Users/Arcadia");
+        assert_eq!(
+            candidate_owner(
+                appcache,
+                &arcadia.join("Library/Application Support/Claude/Cache"),
+                arcadia
+            ),
+            "Claude"
+        );
+        let luvi = Path::new("/Users/luvi");
+        assert_eq!(
+            candidate_owner(pkg, &luvi.join(".npm/_cacache"), luvi),
+            "npm"
+        );
+        assert_eq!(candidate_owner(pkg, &luvi.join(".cache/uv"), luvi), "uv");
+        let cursor = Path::new("/Users/Cursor");
+        assert_eq!(
+            candidate_owner(
+                editors,
+                &cursor.join("Library/Application Support/Code/Cache"),
+                cursor
+            ),
+            "Code"
+        );
     }
 }

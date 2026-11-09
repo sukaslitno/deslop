@@ -17,6 +17,7 @@ try {
   writeFileSync(join(output, "package.json"), '{"type":"module"}\n');
   run([require.resolve("typescript/lib/tsc.js"),
     "src/lib/clean-screen-state.ts", "src/lib/map-screen-state.ts", "src/lib/treemap-layout.ts", "src/lib/app-cache-name.ts",
+    "src/lib/admission-reason.ts", "src/lib/clean-result-summary.ts", "src/lib/initial-selection.ts", "src/lib/map-snapshot.ts",
     "src/i18n/messages/en.ts", "src/i18n/messages/ru.ts", "--target", "ES2022", "--module", "ES2022", "--moduleResolution", "bundler", "--skipLibCheck", "--outDir", output]);
   run(["--test", ...readdirSync(join(root, "scripts")).filter(name => name.endsWith(".test.mjs")).sort().map(name => join("scripts", name))], {
     ...process.env,

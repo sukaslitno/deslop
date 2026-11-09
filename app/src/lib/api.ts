@@ -10,6 +10,12 @@ export interface Entry {
   reason: string;
   scope: string;
   restore: string | null;
+  /**
+   * Optional per-entry tier. An entry may be stricter than its category
+   * (e.g. Service Worker/CacheStorage is YELLOW inside a GREEN category).
+   * Absent in older backends; the UI then falls back to the category tier.
+   */
+  tier?: Tier;
 }
 
 export interface Category {
@@ -89,20 +95,57 @@ export interface Preflight {
   requires_yellow_confirmation: boolean;
 }
 
+export type AdmissionReasonCode =
+  | "allowed"
+  | "identity_or_scope_changed"
+  | "excluded"
+  | "manual_only"
+  | "owner_running"
+  | "singleton_lock_live"
+  | "sqlite_in_use"
+  | "process_probe_unavailable"
+  | "process_probe_timeout"
+  | "process_probe_unsupported"
+  | "sqlite_probe_unavailable"
+  | "sqlite_probe_timeout"
+  | "lock_unreadable";
+
+/**
+ * Wire shape of `Admission`. The Rust struct is `#[serde(rename_all =
+ * "camelCase")]`, so the reason code is serialised as `reasonCode`.
+ */
 export interface Admission {
   id: string;
   path: string;
+  /** Display name of the owning application; empty when not known. */
+  owner?: string;
   state: "allowed" | "busy" | "unknown" | "protected";
-  reason_code: string;
+  /** Known codes are listed; unknown future codes still arrive as strings. */
+  reasonCode: AdmissionReasonCode | (string & {});
   detail: string;
 }
+
+export type CandidateOutcomeStatus =
+  | "deleted"
+  | "completed"
+  | "partial"
+  | "recreated"
+  | "skipped"
+  | "error"
+  | "unknown";
 
 export interface CandidateOutcome {
   id: string;
   path: string;
-  status: "deleted" | "completed" | "skipped" | "error" | "unknown";
+  status: CandidateOutcomeStatus;
   detail: string;
   freed: number;
+  /** Bytes still present after a partial removal. */
+  remaining?: number;
+  measurement?: "allocated" | "scanEstimate" | "unknown";
+  /** Optional admission reason for skipped outcomes (not yet emitted by the backend). */
+  reason_code?: string;
+  owner?: string;
 }
 
 export interface DiskInfo {
@@ -120,6 +163,10 @@ export interface CleanResult {
   skipped: string[];
   errors: string[];
   reinstall: [string, string][];
+  /** Volume free space before/after the run; null when it could not be measured. */
+  free_space_before?: number | null;
+  free_space_after?: number | null;
+  free_space_delta?: number | null;
 }
 
 export interface RunRecord {

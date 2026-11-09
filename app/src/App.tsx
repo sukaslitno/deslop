@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 // Pending Figma export: no local equivalent for the preflight shield yet (see DESIGN_AUDIT_PLAN 5.1).
 import { SafeShield2Line } from "@mingcute/react";
@@ -23,9 +23,12 @@ import {
   type AppPreferencesPatch,
   type ScanSnapshot,
   type CleanResult,
+  type Admission,
+  type CandidateOutcome,
 } from "@/lib/api";
 import { cn, human } from "@/lib/utils";
 import {
+  Badge,
   Button,
   ButtonIcon,
   ButtonSmall,
@@ -49,6 +52,10 @@ import { OrbitingCircles } from "@/components/orbiting-circles";
 import { ScanningGlow } from "@/components/scanning-glow";
 import { scanCtaFor } from "@/lib/clean-screen-state";
 import { appCacheName } from "@/lib/app-cache-name";
+import { admissionReasonKey, outcomeLabelKey } from "@/lib/admission-reason";
+import { isSuccessfulOutcome, summarizeCleanResult } from "@/lib/clean-result-summary";
+import { entryTier, initialSelection as computeInitialSelection, selectableEntries } from "@/lib/initial-selection";
+import { normalizeMapTree } from "@/lib/map-snapshot";
 import { initialMessage, LocaleProvider, useLocale } from "@/i18n";
 
 const TIER_ORDER: Record<Tier, number> = { GREEN: 0, YELLOW: 1, RED: 2 };
@@ -128,27 +135,27 @@ function StorageBreakdownBar({
         <div className="flex min-w-0 items-center gap-2">
           <img className="size-11 shrink-0" src={diskIcon} alt="" />
           <div className="min-w-0">
-            <p className="text-muted-foreground text-style-caption font-medium tracking-[0.08em] uppercase">{t("currentVolume")}</p>
-            {disk ? <p className="truncate text-style-body-small tracking-tight"><span className="text-style-heading font-medium tabular-nums">{t("availableOf", { available: human(available), capacity: human(capacity) })}</span></p> : <p className="text-muted-foreground mt-0.5 text-style-body-small">{t("readingCapacity")}</p>}
+            <p className="text-[var(--vc-text-secondary)] text-style-caption font-medium tracking-[0.08em] uppercase">{t("currentVolume")}</p>
+            {disk ? <p className="truncate text-style-body-small tracking-tight"><span className="text-style-heading font-medium tabular-nums">{t("availableOf", { available: human(available), capacity: human(capacity) })}</span></p> : <p className="text-[var(--vc-text-secondary)] mt-0.5 text-style-body-small">{t("readingCapacity")}</p>}
           </div>
         </div>
-        {breakdown && <span className="text-muted-foreground pt-1 text-right text-style-caption tabular-nums">{candidateBytes ? t("candidateData", { bytes: human(candidateBytes) }) : t("noVerifiedCandidates")}</span>}
+        {breakdown && <span className="text-[var(--vc-text-secondary)] pt-1 text-right text-style-caption tabular-nums">{candidateBytes ? t("candidateData", { bytes: human(candidateBytes) }) : t("noVerifiedCandidates")}</span>}
       </div>
       <div className="mt-4 flex h-5 overflow-hidden rounded-[var(--vc-radius-full)] border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-background)] p-[var(--vc-gap-2)]" aria-label={t("capacitySegments")}>
         <Segment label={t("otherUsed")} bytes={otherUsed} color="bg-[var(--vc-surface-active)]" />
         {categories.map((category) => <Segment key={category.categoryId} label={t(category.categoryId)} bytes={category.measuredBytes} color={STORAGE_CATEGORY_META[category.categoryId].token} />)}
         <Segment label={t("available")} bytes={available} color="bg-[var(--vc-color-white)]" />
       </div>
-      <div className="text-muted-foreground mt-2 text-style-caption" aria-live="polite">{caption}</div>
-      {breakdown?.measurementKind === "logicalFallback" && candidateBytes > 0 && <div className="text-muted-foreground mt-1 text-style-caption">{t("candidateDataLogicalEstimate")}</div>}
+      <div className="text-[var(--vc-text-secondary)] mt-2 text-style-caption" aria-live="polite">{caption}</div>
+      {breakdown?.measurementKind === "logicalFallback" && candidateBytes > 0 && <div className="text-[var(--vc-text-secondary)] mt-1 text-style-caption">{t("candidateDataLogicalEstimate")}</div>}
       {breakdown && categories.length > 0 && <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-style-caption" aria-label={t("candidateCategories")}>
         {categories.map((category) => {
           const meta = STORAGE_CATEGORY_META[category.categoryId];
           const label = t(category.categoryId);
-          return <li key={category.categoryId} className="flex items-center gap-1.5" tabIndex={0} aria-label={`${label}: ${human(category.measuredBytes)}, ${t("candidateCount", { count: category.candidateCount })}`}><span className={cn("size-2 rounded-sm", meta.token)} aria-hidden="true" />{label} · {human(category.measuredBytes)} · {t("candidateCount", { count: category.candidateCount })}</li>;
+          return <li key={category.categoryId} className="flex items-center gap-1.5" tabIndex={0} aria-label={`${label}: ${human(category.measuredBytes)}, ${t("candidateCount", { count: category.candidateCount })}`}><span className={cn("size-2 rounded-[var(--vc-radius-2)]", meta.token)} aria-hidden="true" />{label} · {human(category.measuredBytes)} · {t("candidateCount", { count: category.candidateCount })}</li>;
         })}
       </ul>}
-      {breakdown && categories.length === 0 && <div className="text-muted-foreground mt-3 text-style-caption">{t("noVerifiedCandidates")}</div>}
+      {breakdown && categories.length === 0 && <div className="text-[var(--vc-text-secondary)] mt-3 text-style-caption">{t("noVerifiedCandidates")}</div>}
     </section>
   );
 }
@@ -175,7 +182,7 @@ export default function App() {
   }, []);
   if (!preferences) {
     const locale = navigator.language.toLowerCase().startsWith("ru") ? "ru" : "en";
-    return <div className="flex h-screen items-center justify-center bg-background text-style-body-small text-muted-foreground">{initialMessage(locale, "loading")}</div>;
+    return <div className="flex h-screen items-center justify-center bg-[var(--vc-surface-background)] text-style-body-small text-[var(--vc-text-secondary)]">{initialMessage(locale, "loading")}</div>;
   }
   return <LocaleProvider preferences={preferences}><AppShell preferences={preferences} onPreferencesChange={setPreferences} /></LocaleProvider>;
 }
@@ -387,11 +394,7 @@ function CleanupResultsWorkspace({
 
           {initializing ? <LoadingState message={t("preparing")} /> : null}
           {scanCta.location === "center" ? <EmptyState action={scanCta.label} onScan={onScan} /> : null}
-          {error ? (
-            <div className="vc-corner-smooth rounded-[var(--vc-radius-16)] bg-[var(--vc-danger-foreground)] p-[var(--vc-gap-16)] text-style-body-small text-[var(--vc-text-primary)]" role="alert">
-              {error}
-            </div>
-          ) : null}
+          {error ? <Notice tone="danger">{error}</Notice> : null}
 
           {breakdown?.measurementKind === "logicalFallback" ? (
             <p className="text-style-caption text-[var(--vc-text-secondary)]">{t("candidateDataLogicalEstimate")}</p>
@@ -470,39 +473,114 @@ function CleanupResultSummary({
   onRetryRefresh: () => void;
 }) {
   const { t } = useLocale();
-  const successful = result.outcomes.filter((outcome) => outcome.status === "deleted" || outcome.status === "completed");
-  const skippedOrFailed = result.outcomes.filter((outcome) => outcome.status !== "deleted" && outcome.status !== "completed");
-  const hasIssues = skippedOrFailed.length > 0 || Boolean(result.record_error);
-  const title = hasIssues ? t("cleanupFinishedWithIssues") : successful.length ? t("cleanupFinished") : t("nothingRemoved");
+  const summary = summarizeCleanResult(result);
+  const issues = result.outcomes.filter((outcome) => !isSuccessfulOutcome(outcome.status));
+  const notes = result.outcomes.filter((outcome) => outcome.status === "partial" || outcome.status === "recreated");
+  const title = summary.title === "finishedWithIssues"
+    ? t("cleanupFinishedWithIssues")
+    : summary.title === "finished" ? t("cleanupFinished") : t("nothingRemoved");
   return (
     <section
       aria-live="polite"
+      aria-label={title}
       className="vc-corner-smooth flex flex-col gap-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-16)]"
     >
       <div className="flex flex-wrap items-start justify-between gap-[var(--vc-gap-16)]">
         <div>
           <h2 className="text-style-body font-medium tracking-[-0.02em]">{title}</h2>
           <p className="mt-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">
-            {t("cleanupOutcomeSummary", {
-              deleted: result.deleted.length,
-              skipped: result.skipped.length,
-              errors: result.errors.length,
-              bytes: human(result.freed),
-            })}
+            {t("cleanupOutcomeSummary", { deleted: summary.succeeded, skipped: summary.skipped, errors: summary.failed })}
           </p>
-          {successful.some((outcome) => outcome.status === "completed") ? <p className="mt-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">{t("operationCompleted", { count: successful.filter((outcome) => outcome.status === "completed").length })}</p> : null}
+          {result.outcomes.some((outcome) => outcome.status === "completed") ? <p className="mt-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">{t("operationCompleted", { count: result.outcomes.filter((outcome) => outcome.status === "completed").length })}</p> : null}
         </div>
         {cleanRefreshFailed ? <Button icon="refresh" onClick={onRetryRefresh} variant="gray">{t("retryRefresh")}</Button> : null}
       </div>
-      {skippedOrFailed.length > 0 ? (
-        <ul className="space-y-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">
-          {skippedOrFailed.map((outcome) => <li key={outcome.id}>{outcome.path}: {outcome.detail}</li>)}
+      <dl className="grid grid-cols-1 gap-[var(--vc-gap-8)] sm:grid-cols-2">
+        <ResultMetric
+          label={t("resultRemovedData")}
+          testId="result-removed"
+          value={summary.removedUnknown && summary.removedBytes === 0 ? null : human(summary.removedBytes)}
+          fallback={t("resultNotMeasured")}
+          suffix={summary.removedIsEstimate ? t("resultScanEstimate") : undefined}
+        />
+        <ResultMetric
+          label={t("resultFreeSpaceGain")}
+          testId="result-free-space"
+          value={summary.freeSpaceDelta === null ? null : human(summary.freeSpaceDelta)}
+          fallback={t("resultNotMeasured")}
+        />
+      </dl>
+      {summary.spaceHeld ? <p className="text-style-caption text-[var(--vc-text-secondary)]">{t("resultSpaceHeld")}</p> : null}
+      {notes.length > 0 ? (
+        <ul className="flex flex-col gap-[var(--vc-gap-8)]">
+          {notes.map((outcome) => <OutcomeRow key={outcome.id} outcome={outcome} />)}
         </ul>
       ) : null}
-      {result.record_error ? <p className="text-style-caption text-[var(--vc-warning)]">{t("historyWriteError")} {result.record_error}</p> : null}
+      {issues.length > 0 ? (
+        <ul className="flex flex-col gap-[var(--vc-gap-8)]">
+          {issues.map((outcome) => <OutcomeRow key={outcome.id} outcome={outcome} />)}
+        </ul>
+      ) : null}
+      {result.record_error ? <Notice tone="warning">{t("historyWriteError")} <ReasonCaption>{result.record_error}</ReasonCaption></Notice> : null}
       {cleanRefreshFailed ? <p className="text-style-caption text-[var(--vc-text-secondary)]">{t("cleanupRefreshFailed")}</p> : null}
     </section>
   );
+}
+
+function ResultMetric({ label, value, fallback, suffix, testId }: { label: string; value: string | null; fallback: string; suffix?: string; testId: string }) {
+  return (
+    <div className="vc-corner-smooth flex flex-col gap-[var(--vc-gap-8)] rounded-[var(--vc-radius-14)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-16)]" data-testid={testId}>
+      <dt className="text-style-caption text-[var(--vc-text-secondary)]">{label}</dt>
+      <dd className="flex flex-wrap items-baseline gap-[var(--vc-gap-8)]">
+        {value === null
+          ? <span className="text-style-body-small text-[var(--vc-text-secondary)]">{fallback}</span>
+          : <span className="text-style-numeric-small tracking-[-0.02em] text-[var(--vc-text-primary)]">{value}</span>}
+        {suffix ? <span className="text-style-caption text-[var(--vc-text-secondary)]">{suffix}</span> : null}
+      </dd>
+    </div>
+  );
+}
+
+/** One cleanup outcome: localized primary line, raw backend detail as a muted caption. */
+function OutcomeRow({ outcome }: { outcome: CandidateOutcome }) {
+  const { t } = useLocale();
+  const key = outcomeLabelKey(outcome.status, outcome.reason_code, outcome.owner);
+  const label = t(key, {
+    owner: outcome.owner ?? "",
+    freed: human(outcome.freed),
+    remaining: human(outcome.remaining ?? 0),
+  });
+  const estimate = outcome.measurement === "scanEstimate" && isSuccessfulOutcome(outcome.status);
+  return (
+    <li className="flex min-w-0 flex-col gap-[var(--vc-gap-2)]" data-outcome-status={outcome.status}>
+      <span className="truncate text-style-body-small font-medium text-[var(--vc-text-primary)]" title={outcome.path}>{cacheLeaf(outcome.path)}</span>
+      <span className="text-style-caption text-[var(--vc-text-primary)]">
+        {label}{estimate ? ` ${t("resultScanEstimate")}` : ""}
+      </span>
+      {outcome.detail && outcome.status !== "partial" && outcome.status !== "recreated" ? <ReasonCaption>{outcome.detail}</ReasonCaption> : null}
+    </li>
+  );
+}
+
+/** Blocked preflight entry with a localized reason and the raw detail underneath. */
+function AdmissionRow({ admission }: { admission: Admission }) {
+  const { t } = useLocale();
+  // The backend struct is camelCase; accept the snake_case spelling too so a
+  // serde change on either side cannot regress the UI to raw text.
+  const code = admission.reasonCode ?? (admission as { reason_code?: string }).reason_code;
+  const owner = admission.owner?.trim() ?? "";
+  const key = admissionReasonKey(code, admission.state, owner);
+  return (
+    <li className="flex min-w-0 flex-col gap-[var(--vc-gap-2)]" data-reason-code={code}>
+      <span className="truncate text-style-body-small font-medium text-[var(--vc-text-primary)]" title={admission.path}>{cacheLeaf(admission.path)}</span>
+      <span className="text-style-caption text-[var(--vc-text-primary)]">{t(key, { owner })}</span>
+      {admission.detail ? <ReasonCaption>{admission.detail}</ReasonCaption> : null}
+    </li>
+  );
+}
+
+function ReasonCaption({ children }: { children: string }) {
+  return <span className="text-style-caption break-words text-[var(--vc-text-secondary)]">{children}</span>;
 }
 
 function CleanupTierSection({
@@ -585,7 +663,7 @@ function CleanupCategoryRow({
   const categoryTitle = localizedCategoryTitle(category, t);
   const isOpen = expanded.has(category.id);
   const checkable = category.tier !== "RED";
-  const entryIds = category.entries.map((entry) => entry.id);
+  const entryIds = category.entries.filter((entry) => entryTier(entry, category) !== "RED").map((entry) => entry.id);
   const allSelected = entryIds.length > 0 && entryIds.every((id) => selected.has(id));
   const someSelected = !allSelected && entryIds.some((id) => selected.has(id));
   const sortedEntries = [...category.entries].sort((a, b) => b.size - a.size || a.path.localeCompare(b.path));
@@ -647,6 +725,7 @@ function CleanupCategoryRow({
             <div className="flex flex-col gap-[var(--vc-gap-8)]">
               {applicationGroups.map(([name, entries]) => (
                 <CleanupApplicationGroup
+                  category={category}
                   entries={entries}
                   expanded={expanded}
                   groupId={`${category.id}:${name}`}
@@ -662,8 +741,9 @@ function CleanupCategoryRow({
             <ul className="vc-corner-smooth flex flex-col gap-[var(--vc-gap-8)] rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-16)]">
               {sortedEntries.map((entry) => (
                 <CleanupEntryRow
-                  checkable={checkable}
+                  checkable={checkable && entryTier(entry, category) !== "RED"}
                   entry={entry}
+                  stricterTier={entryTier(entry, category) !== category.tier ? entryTier(entry, category) : undefined}
                   key={entry.id}
                   onToggleEntry={onToggleEntry}
                   selected={selected.has(entry.id)}
@@ -678,6 +758,7 @@ function CleanupCategoryRow({
 }
 
 function CleanupApplicationGroup({
+  category,
   entries,
   expanded,
   groupId,
@@ -686,6 +767,7 @@ function CleanupApplicationGroup({
   onToggleExpand,
   selected,
 }: {
+  category: Category;
   entries: readonly Category["entries"][number][];
   expanded: Set<string>;
   groupId: string;
@@ -696,8 +778,9 @@ function CleanupApplicationGroup({
 }) {
   const { t } = useLocale();
   const isOpen = expanded.has(groupId);
-  const allSelected = entries.length > 0 && entries.every((entry) => selected.has(entry.id));
-  const someSelected = !allSelected && entries.some((entry) => selected.has(entry.id));
+  const checkableEntries = entries.filter((entry) => entryTier(entry, category) !== "RED");
+  const allSelected = checkableEntries.length > 0 && checkableEntries.every((entry) => selected.has(entry.id));
+  const someSelected = !allSelected && checkableEntries.some((entry) => selected.has(entry.id));
   const total = entries.reduce((sum, entry) => sum + entry.size, 0);
 
   return (
@@ -707,7 +790,8 @@ function CleanupApplicationGroup({
           <Checkbox
             aria-label={t("select", { path: name })}
             checked={allSelected ? true : someSelected ? "indeterminate" : false}
-            onCheckedChange={() => entries.forEach((entry) => {
+            disabled={checkableEntries.length === 0}
+            onCheckedChange={() => checkableEntries.forEach((entry) => {
               if (allSelected === selected.has(entry.id)) onToggleEntry(entry.id);
             })}
           />
@@ -735,7 +819,15 @@ function CleanupApplicationGroup({
       {isOpen ? (
         <ul className="flex flex-col gap-[var(--vc-gap-8)]">
           {entries.map((entry) => (
-            <CleanupEntryRow entry={entry} key={entry.id} nested onToggleEntry={onToggleEntry} selected={selected.has(entry.id)} />
+            <CleanupEntryRow
+              checkable={entryTier(entry, category) !== "RED"}
+              entry={entry}
+              key={entry.id}
+              nested
+              onToggleEntry={onToggleEntry}
+              selected={selected.has(entry.id)}
+              stricterTier={entryTier(entry, category) !== category.tier ? entryTier(entry, category) : undefined}
+            />
           ))}
         </ul>
       ) : null}
@@ -749,12 +841,15 @@ function CleanupEntryRow({
   nested = false,
   onToggleEntry,
   selected,
+  stricterTier,
 }: {
   checkable?: boolean;
   entry: Category["entries"][number];
   nested?: boolean;
   onToggleEntry: (id: string) => void;
   selected: boolean;
+  /** Set when the entry's own tier differs from its category (e.g. YELLOW inside GREEN). */
+  stricterTier?: Tier;
 }) {
   const { t } = useLocale();
   return (
@@ -773,6 +868,9 @@ function CleanupEntryRow({
           "min-w-0 flex-1 truncate text-[var(--vc-text-secondary)] tracking-[-0.02em]",
           nested ? "text-style-body-small font-medium" : "text-style-body",
         )} title={entry.path}>{cacheLeaf(entry.path)}</span>
+        {stricterTier && stricterTier !== "GREEN" ? (
+          <Badge title={entry.reason} variant="secondary">{stricterTier === "YELLOW" ? t("questionable") : t("manualOnly")}</Badge>
+        ) : null}
       </div>
       <span className="shrink-0 text-style-body tabular-nums tracking-[-0.02em]">{human(entry.size)}</span>
     </li>
@@ -823,9 +921,8 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
   }
 
   function initialSelection(snapshot: ScanSnapshot) {
-    return preferences.safeCandidateSelection === "automatic"
-      ? new Set(snapshot.categories.filter((category) => category.tier === "GREEN").flatMap((category) => category.entries.map((entry) => entry.id)))
-      : new Set<string>();
+    // Per entry: an entry's own tier (when reported) wins over its category.
+    return computeInitialSelection(snapshot.categories, preferences.safeCandidateSelection);
   }
 
   async function runScan(scanRoots?: string[], only?: string[]): Promise<boolean> {
@@ -891,7 +988,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
     void api.cleanupExclusions().then(setExclusions).catch(() => undefined);
   }, []);
 
-  const selectable = useMemo(() => cats.flatMap((c) => c.tier === "RED" ? [] : c.entries), [cats]);
+  const selectable = useMemo(() => selectableEntries(cats), [cats]);
   const selectedTotal = useMemo(
     () =>
       cats
@@ -919,7 +1016,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
     });
   }
   function toggleCategory(category: Category) {
-    const ids = category.entries.map((entry) => entry.id);
+    const ids = category.entries.filter((entry) => entryTier(entry, category) !== "RED").map((entry) => entry.id);
     setSelected((previous) => {
       const next = new Set(previous);
       const allSelected = ids.every((id) => next.has(id));
@@ -993,11 +1090,16 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
       setPreflight(null);
       setCleanResult(r);
       setCleanRefreshFailed(false);
-      const hasIssues = r.skipped.length > 0 || r.errors.length > 0 || Boolean(r.record_error);
-      toast(
-        r.deleted.length ? (r.freed_size_unknown ? t("cleanupCompletedSizeUnknown") : t("freed", { bytes: human(r.freed) })) : t("nothingRemoved"),
-        hasIssues || !r.deleted.length ? "danger" : "success",
-      );
+      const summary = summarizeCleanResult(r);
+      const removed = summary.succeeded > 0;
+      const toastText = !removed
+        ? t("nothingRemoved")
+        : summary.removedUnknown && summary.removedBytes === 0
+          ? t("cleanupCompletedSizeUnknown")
+          : summary.freeSpaceDelta === null
+            ? t("toastRemovedDeltaUnknown", { bytes: human(summary.removedBytes) })
+            : t("toastRemovedWithDelta", { bytes: human(summary.removedBytes), delta: human(summary.freeSpaceDelta) });
+      toast(toastText, summary.hasIssues || !removed ? "danger" : "success");
       shouldRefresh = true;
     } catch (e) {
       // A preflight is single-use once confirmation starts. Never leave a
@@ -1074,7 +1176,7 @@ function AppShell({ preferences, onPreferencesChange }: { preferences: AppPrefer
 
   return (
     <TooltipProvider>
-      <div ref={(element) => { if (element) element.inert = Boolean(preflight); }} aria-hidden={preflight ? true : undefined} className={cn("flex h-screen flex-col bg-background text-foreground", preflight && "pointer-events-none")}>
+      <div ref={(element) => { if (element) element.inert = Boolean(preflight); }} aria-hidden={preflight ? true : undefined} className={cn("flex h-screen flex-col bg-[var(--vc-surface-background)] text-[var(--vc-text-primary)]", preflight && "pointer-events-none")}>
         {/* Windows has its native title bar; only macOS needs this drag/traffic-light region. */}
         {isMac ? <div data-tauri-drag-region className="h-14 shrink-0" /> : null}
         {isScanningClean ? (
@@ -1190,7 +1292,7 @@ function MapView({
   onViewChange: (view: WorkspaceRoute) => void;
 }) {
   const { t, locale } = useLocale();
-  const { snapshot, loading, error, treeJob, scanHome, cancelTreeScan } = map;
+  const { snapshot, loading, error, notice, treeJob, scanHome, cancelTreeScan } = map;
 
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -1235,11 +1337,31 @@ function MapView({
           usedLabel={disk?.total ? diskLabel(used) : "—"}
         />
 
-        <div className="relative min-h-0 w-full flex-1">
-          {error && <div className="vc-corner-smooth mb-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-danger-foreground)] p-[var(--vc-gap-16)] text-style-body-small text-[var(--vc-text-primary)]" role="alert">{error}</div>}
-          {snapshot?.is_partial ? <div className="vc-corner-smooth mb-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-warning-foreground)] p-[var(--vc-gap-16)] text-style-body-small text-[var(--vc-text-primary)]" role="status">{t("mapPartial", { count: snapshot.skipped_nodes })}</div> : null}
+        <div className="relative flex min-h-0 w-full flex-1 flex-col gap-[var(--vc-gap-16)]">
+          {error ? <Notice tone="danger">{error}</Notice> : null}
+          {notice ? <Notice tone="neutral">{notice}</Notice> : null}
+          {snapshot?.is_partial ? <Notice tone="warning">{t("mapPartial", { count: snapshot.skipped_nodes })}</Notice> : null}
+          {snapshot ? (
+            <div className="flex w-full shrink-0 items-center justify-end gap-[var(--vc-gap-16)]" role={loading ? "status" : undefined} aria-live="polite">
+              {loading ? (
+                <>
+                  <span className="flex min-w-0 items-center gap-[var(--vc-gap-8)] text-style-caption text-[var(--vc-text-secondary)]">
+                    <OrbitingCircles size={16} />
+                    <span className="truncate">{t("diskMapLoading")}</span>
+                  </span>
+                  <Button disabled={!treeJob} icon="x" onClick={() => void cancelTreeScan()} variant="gray">
+                    {t("cancelScanShort")}
+                  </Button>
+                </>
+              ) : (
+                <Button icon="refresh" onClick={() => void scanHome()} variant="gray">
+                  {t("rescanShort")}
+                </Button>
+              )}
+            </div>
+          ) : null}
           {isInitialMapScan && (
-            <section className="flex h-full w-full flex-col items-center justify-center gap-[var(--vc-gap-24)] overflow-hidden text-center" role="status" aria-busy="true" aria-live="polite">
+            <section className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-[var(--vc-gap-24)] overflow-hidden text-center" role="status" aria-busy="true" aria-live="polite">
               <div className="vc-corner-smooth grid size-16 place-items-center overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-surface-foreground)]">
                 <img alt="" src={scanStatusCheck} />
               </div>
@@ -1252,9 +1374,13 @@ function MapView({
               </Button>
             </section>
           )}
-          {snapshot && <Treemap key={snapshot.id} root={snapshot.root} snapshotId={snapshot.id} onReveal={api.revealMapNode} />}
+          {snapshot ? (
+            <div className="min-h-0 w-full flex-1">
+              <Treemap key={snapshot.id} root={snapshot.root} snapshotId={snapshot.id} onReveal={api.revealMapNode} />
+            </div>
+          ) : null}
           {!snapshot && !loading && (
-            <section className="flex h-full w-full flex-col items-center justify-center gap-[var(--vc-gap-24)] overflow-hidden text-center">
+            <section className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-[var(--vc-gap-24)] overflow-hidden text-center">
               <div className="vc-corner-smooth grid size-16 place-items-center overflow-hidden rounded-[var(--vc-radius-24)] bg-[var(--vc-color-dark-aqua)]">
                 <Icon className="size-[42px] text-[var(--vc-color-aqua)]" name="layers" />
               </div>
@@ -1386,7 +1512,7 @@ function SettingsLink({
 }
 
 function InformationCallout({ title, detail }: { title: string; detail: string }) {
-  return <section className="mt-4 flex gap-3 rounded-xl bg-muted/60 px-3 py-3"><SafeShield2Line className="mt-0.5 size-4 shrink-0 text-foreground" aria-hidden="true" /><div className="min-w-0"><h2 className="text-style-body-small font-medium">{title}</h2><p className="text-muted-foreground mt-1 text-style-body-small leading-5 text-pretty">{detail}</p></div></section>;
+  return <section className="vc-corner-smooth mt-[var(--vc-gap-16)] flex gap-[var(--vc-gap-8)] rounded-[var(--vc-radius-16)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-16)]"><SafeShield2Line className="mt-[var(--vc-gap-2)] size-4 shrink-0 text-[var(--vc-text-primary)]" aria-hidden="true" /><div className="min-w-0"><h2 className="text-style-body-small font-medium">{title}</h2><p className="mt-[var(--vc-gap-4)] text-style-body-small text-pretty text-[var(--vc-text-secondary)]">{detail}</p></div></section>;
 }
 
 function AutomationsView({
@@ -1427,6 +1553,7 @@ function AutomationsView({
             <img alt="" className="block" src={automationEmptyIcon} />
           </div>
           <div className="flex max-w-[416px] flex-col items-center gap-[var(--vc-gap-16)]">
+            <Badge variant="secondary">{t("automationInDevelopment")}</Badge>
             <h1 className="text-style-heading font-medium tracking-[-0.02em]" id="automation-empty-title">{t("automationTitle")}</h1>
             <p className="text-style-caption tracking-[-0.02em] text-[var(--vc-text-secondary)]">{t("automationUnavailable")}</p>
           </div>
@@ -1459,7 +1586,7 @@ function AssistantView() {
 
 function AssistantConnectionView({ providers }: { providers: AgentProviderPreview[] }) {
   const { t } = useLocale();
-  return <main className="min-h-0 flex-1 overflow-y-auto px-5 pb-5"><section className="mx-auto max-w-3xl py-8"><h1 className="text-style-heading font-medium tracking-tight">{t("connectAgent")}</h1><p className="text-muted-foreground mt-1 max-w-2xl text-style-body-small leading-6 text-pretty">{t("assistantNoBuiltInModel")}</p><div className="mt-7 divide-y border-y">{providers.map((provider) => <div key={provider.id} className="flex min-h-16 flex-wrap items-center justify-between gap-3 py-3"><div className="min-w-0"><h2 className="text-style-body-small font-medium">{t(provider.nameKey)}</h2><p className="text-muted-foreground mt-0.5 text-style-caption">{t("notConnected")}</p></div><span className="text-muted-foreground text-style-caption font-medium">{t("comingSoon")}</span></div>)}</div><p className="text-muted-foreground mt-4 text-style-body-small text-pretty">{t("connectionNextPhase")}</p><div className="mt-8 grid gap-x-8 gap-y-5 sm:grid-cols-2"><BoundaryItem label={t("localOnMac")} /><BoundaryItem label={t("selectedFolderOnly")} /><BoundaryItem label={t("readOnlyAccess")} /><BoundaryItem label={t("metadataDefault")} /></div></section></main>;
+  return <main className="min-h-0 flex-1 overflow-y-auto px-5 pb-5"><section className="mx-auto max-w-3xl py-8"><h1 className="text-style-heading font-medium tracking-tight">{t("connectAgent")}</h1><p className="text-[var(--vc-text-secondary)] mt-1 max-w-2xl text-style-body-small leading-6 text-pretty">{t("assistantNoBuiltInModel")}</p><div className="mt-[var(--vc-gap-24)] divide-y divide-[var(--vc-border-subtle)] border-y border-[var(--vc-border-subtle)]">{providers.map((provider) => <div key={provider.id} className="flex min-h-16 flex-wrap items-center justify-between gap-3 py-3"><div className="min-w-0"><h2 className="text-style-body-small font-medium">{t(provider.nameKey)}</h2><p className="text-[var(--vc-text-secondary)] mt-0.5 text-style-caption">{t("notConnected")}</p></div><span className="text-[var(--vc-text-secondary)] text-style-caption font-medium">{t("comingSoon")}</span></div>)}</div><p className="text-[var(--vc-text-secondary)] mt-4 text-style-body-small text-pretty">{t("connectionNextPhase")}</p><div className="mt-8 grid gap-x-8 gap-y-5 sm:grid-cols-2"><BoundaryItem label={t("localOnMac")} /><BoundaryItem label={t("selectedFolderOnly")} /><BoundaryItem label={t("readOnlyAccess")} /><BoundaryItem label={t("metadataDefault")} /></div></section></main>;
 }
 
 function BoundaryItem({ label }: { label: string }) {
@@ -1509,7 +1636,7 @@ function LoadingState({ message, compact = false }: { message: string; compact?:
   return (
     <div
       className={cn(
-        "text-muted-foreground flex flex-col items-center justify-center gap-3 text-center text-style-body-small",
+        "flex flex-col items-center justify-center gap-[var(--vc-gap-16)] text-center text-style-body-small text-[var(--vc-text-secondary)]",
         compact ? "h-40" : "h-full min-h-40",
       )}
       role="status"
@@ -1522,10 +1649,55 @@ function LoadingState({ message, compact = false }: { message: string; compact?:
   );
 }
 
+type NoticeTone = "danger" | "warning" | "neutral";
+
+const NOTICE_TONE: Record<NoticeTone, { surface: string; icon: string }> = {
+  danger: { surface: "bg-[var(--vc-danger-foreground)]", icon: "text-[var(--vc-danger)]" },
+  warning: { surface: "bg-[var(--vc-warning-foreground)]", icon: "text-[var(--vc-warning)]" },
+  neutral: { surface: "border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-foreground)]", icon: "text-[var(--vc-text-secondary)]" },
+};
+
+/**
+ * Inline callout for errors, warnings and neutral status. Text stays
+ * `--vc-text-primary` on the tinted semantic surface for contrast; the
+ * semantic colour is carried only by the icon.
+ */
+function Notice({
+  tone,
+  children,
+  action,
+  className,
+  role,
+}: {
+  tone: NoticeTone;
+  children: ReactNode;
+  action?: ReactNode;
+  className?: string;
+  role?: "alert" | "status";
+}) {
+  const palette = NOTICE_TONE[tone];
+  return (
+    <div
+      className={cn(
+        "vc-corner-smooth flex w-full items-start gap-[var(--vc-gap-8)] rounded-[var(--vc-radius-16)] p-[var(--vc-gap-16)] text-style-body-small text-[var(--vc-text-primary)]",
+        palette.surface,
+        className,
+      )}
+      role={role ?? (tone === "danger" ? "alert" : "status")}
+    >
+      <Icon className={cn("mt-[var(--vc-gap-2)] size-4", palette.icon)} name="info" />
+      <div className="flex min-w-0 flex-1 flex-col gap-[var(--vc-gap-4)]">{children}</div>
+      {action ? <div className="shrink-0">{action}</div> : null}
+    </div>
+  );
+}
+
 type PersistentMapState = {
   snapshot: MapSnapshot | null;
   loading: boolean;
   error: string;
+  /** Neutral status such as a user-requested cancellation; not an error. */
+  notice: string;
   treeJob: TreeJobStatus | null;
 };
 
@@ -1542,11 +1714,16 @@ function usePersistentMap(preferences: AppPreferences, t: ReturnType<typeof useL
   const [snapshot, setSnapshot] = useState<MapSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [treeJob, setTreeJob] = useState<TreeJobStatus | null>(null);
   const inFlight = useRef(false);
   const activeJobId = useRef<string | null>(null);
   const runToken = useRef(0);
   const cancellationRequested = useRef(new Set<string>());
+  // Read through a ref so the callback identity does not change with every
+  // completed snapshot and the cancellation copy reflects the current state.
+  const hasSnapshot = useRef(false);
+  hasSnapshot.current = snapshot !== null;
 
   const scanHome = useCallback(async () => {
     // Claim the operation before the first await (including `homeDir`).
@@ -1554,6 +1731,7 @@ function usePersistentMap(preferences: AppPreferences, t: ReturnType<typeof useL
     inFlight.current = true;
     const token = ++runToken.current;
     setError("");
+    setNotice("");
     setLoading(true);
     try {
       const home = preferences.rememberLastMapFolder && preferences.lastMapFolder
@@ -1573,22 +1751,23 @@ function usePersistentMap(preferences: AppPreferences, t: ReturnType<typeof useL
       }
       if (token !== runToken.current) return;
       if (job.phase === "cancelled" || cancellationRequested.current.has(started.id)) {
-        setError(t(snapshot ? "mapRefreshCancelled" : "mapInitialScanCancelled"));
+        setNotice(t(hasSnapshot.current ? "mapRefreshCancelled" : "mapInitialScanCancelled"));
         return;
       }
       if (job.phase !== "completed" || !job.snapshot) throw new Error(job.error ?? job.message);
-      setSnapshot(job.snapshot);
+      setSnapshot({ ...job.snapshot, root: normalizeMapTree(job.snapshot.root) });
     } catch (reason) {
       if (token === runToken.current) setError(String(reason));
     } finally {
       if (token === runToken.current) {
+        if (activeJobId.current) cancellationRequested.current.delete(activeJobId.current);
         activeJobId.current = null;
         inFlight.current = false;
         setLoading(false);
         setTreeJob(null);
       }
     }
-  }, [preferences.lastMapFolder, preferences.rememberLastMapFolder, snapshot, t]);
+  }, [preferences.lastMapFolder, preferences.rememberLastMapFolder, t]);
 
   const cancelTreeScan = useCallback(async () => {
     const id = activeJobId.current;
@@ -1605,7 +1784,7 @@ function usePersistentMap(preferences: AppPreferences, t: ReturnType<typeof useL
     }
   }, []);
 
-  return { snapshot, loading, error, treeJob, scanHome, cancelTreeScan };
+  return { snapshot, loading, error, notice, treeJob, scanHome, cancelTreeScan };
 }
 
 
@@ -1689,45 +1868,45 @@ function PreflightDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--vc-overlay)] p-[var(--vc-gap-24)]" role="dialog" aria-modal="true" aria-labelledby="preflight-title">
       <div ref={dialogRef} tabIndex={-1} className="vc-corner-smooth max-h-[calc(100vh-2.5rem)] w-full max-w-xl overflow-y-auto rounded-[var(--vc-radius-24)] border border-[var(--vc-border-subtle)] bg-[var(--vc-surface-foreground)] p-[var(--vc-gap-24)]">
-        <div className="flex items-start gap-3">
-          <SafeShield2Line className={cn("mt-0.5 size-5", preflight.requires_yellow_confirmation ? "text-yellow" : "text-green")} />
+        <div className="flex items-start gap-[var(--vc-gap-16)]">
+          <SafeShield2Line aria-hidden="true" className={cn("mt-[var(--vc-gap-2)] size-5 shrink-0", preflight.requires_yellow_confirmation ? "text-[var(--vc-warning)]" : "text-[var(--vc-success)]")} />
           <div>
-            <h2 id="preflight-title" className="font-medium">{t("reviewScope")}</h2>
-            <p className="text-muted-foreground mt-1 text-style-body-small">
+            <h2 id="preflight-title" className="text-style-body font-medium tracking-[-0.02em]">{t("reviewScope")}</h2>
+            <p className="mt-[var(--vc-gap-4)] text-style-body-small text-[var(--vc-text-secondary)]">
               {t("preflightSummary", { count: preflight.entries.length, bytes: human(preflight.total) })}
             </p>
           </div>
         </div>
         {preflight.requires_yellow_confirmation && (
-          <div className="border-yellow/30 bg-yellow/5 mt-4 rounded-lg border p-3 text-style-body-small">
-            <span className="font-medium">{t("redownloadRequired")}</span> {t("redownloadDetail", { count: preflight.yellow_count })}
-          </div>
+          <Notice className="mt-[var(--vc-gap-16)]" tone="warning">
+            <span><span className="font-medium">{t("redownloadRequired")}</span> {t("redownloadDetail", { count: preflight.yellow_count })}</span>
+          </Notice>
         )}
         {preflight.running_apps.length > 0 && (
-          <div className="border-yellow/30 bg-yellow/5 mt-3 rounded-lg border p-3 text-style-body-small">
+          <Notice className="mt-[var(--vc-gap-8)]" tone="warning">
             {t("runningAppsDetail", { apps: preflight.running_apps.join(", ") })}
-          </div>
+          </Notice>
         )}
         {blockedEntries.length > 0 && (
-          <section className="vc-corner-smooth mt-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-warning-foreground)] p-[var(--vc-gap-16)]">
-            <h3 className="text-style-body-small font-medium tracking-[-0.02em]">{t("excludedEntries")}</h3>
-            <ul className="mt-[var(--vc-gap-8)] space-y-[var(--vc-gap-4)] text-style-caption text-[var(--vc-text-secondary)]">
-              {blockedEntries.map((entry) => <li key={entry.id} title={entry.path}>{cacheLeaf(entry.path)}: {entry.detail}</li>)}
+          <section aria-labelledby="preflight-blocked-title" className="vc-corner-smooth mt-[var(--vc-gap-16)] rounded-[var(--vc-radius-16)] bg-[var(--vc-warning-foreground)] p-[var(--vc-gap-16)]">
+            <h3 id="preflight-blocked-title" className="text-style-body-small font-medium tracking-[-0.02em]">{t("excludedEntries")}</h3>
+            <ul className="mt-[var(--vc-gap-8)] flex flex-col gap-[var(--vc-gap-8)]">
+              {blockedEntries.map((entry) => <AdmissionRow admission={entry} key={entry.id} />)}
             </ul>
           </section>
         )}
         {!canConfirm ? <p className="mt-[var(--vc-gap-16)] text-style-caption text-[var(--vc-text-secondary)]">{t("noSafeEntries")}</p> : null}
-        <ul className="mt-4 max-h-48 space-y-2 overflow-y-auto text-style-caption">
+        <ul className="mt-[var(--vc-gap-16)] flex max-h-48 flex-col gap-[var(--vc-gap-8)] overflow-y-auto text-style-caption">
           {preflight.entries.map((entry) => (
             <li key={entry.id} className="vc-corner-smooth rounded-[var(--vc-radius-8)] bg-[var(--vc-surface-active)] p-[var(--vc-gap-8)]">
-              <div className="flex justify-between gap-3"><code className="min-w-0 truncate font-mono" title={entry.path}>{entry.path}</code><span className="shrink-0">{human(entry.size)}</span></div>
+              <div className="flex justify-between gap-[var(--vc-gap-16)]"><span className="min-w-0 truncate text-[var(--vc-text-primary)]" title={entry.path}>{entry.path}</span><span className="shrink-0 tabular-nums">{human(entry.size)}</span></div>
               <p className="mt-[var(--vc-gap-4)] text-[var(--vc-text-secondary)]">{entry.scope}</p>
-              {entry.restore && <p className="text-muted-foreground mt-1">{t("restore", { value: entry.restore })}</p>}
-              <button className="mt-[var(--vc-gap-8)] text-style-caption text-[var(--vc-text-secondary)] underline outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" disabled={cleaning} onClick={() => onExclude(entry)} tabIndex={-1} type="button">{t("excludeFromCleanup")}</button>
+              {entry.restore && <p className="mt-[var(--vc-gap-4)] text-[var(--vc-text-secondary)]">{t("restore", { value: entry.restore })}</p>}
+              <button className="mt-[var(--vc-gap-8)] rounded-[var(--vc-radius-4)] text-style-caption text-[var(--vc-text-secondary)] underline outline-none focus-visible:ring-2 focus-visible:ring-[var(--vc-focus-ring)]" disabled={cleaning} onClick={() => onExclude(entry)} tabIndex={-1} type="button">{t("excludeFromCleanup")}</button>
             </li>
           ))}
         </ul>
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="mt-[var(--vc-gap-24)] flex justify-end gap-[var(--vc-gap-8)]">
           <Button data-preflight-cancel variant="gray" onClick={onCancel} disabled={cleaning}>{canConfirm ? t("cancel") : t("doNotClean")}</Button>
           <Button disabled={cleaning || !canConfirm} icon={cleaning ? undefined : "delete"} onClick={onConfirm} variant="destructive">
             {cleaning ? <OrbitingCircles size={16} /> : null}

@@ -1,5 +1,16 @@
 import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { extendTailwindMerge } from "tailwind-merge";
+
+// The design-system typography utilities (`text-style-*`, see index.css) are
+// font-size classes. Without this, tailwind-merge treats them as text colours
+// and silently drops either the style or a `text-[var(--vc-*)]` colour.
+const twMerge = extendTailwindMerge({
+  extend: {
+    classGroups: {
+      "font-size": [{ "text-style": ["heading", "body", "body-small", "caption", "micro", "numeric-large", "numeric-small"] }],
+    },
+  },
+});
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));

@@ -5,6 +5,7 @@ import { layoutTreemap, type TreemapRect } from "@/lib/treemap-layout";
 import { Button, PathIsland } from "@/design-system";
 import { toast } from "@/lib/toast";
 import { useLocale } from "@/i18n";
+import { aggregateItemCount, isAggregateNode } from "@/lib/map-snapshot";
 import "./treemap.css";
 
 // Matches Figma's 4px inset, 8px label and 4px gap below the label.
@@ -13,13 +14,15 @@ const LABEL_HEIGHT = 8;
 const CHILD_TOP = CELL_INSET + LABEL_HEIGHT + CELL_INSET;
 const MAX_DEPTH = 4;
 
-function Cell({ rect, depth, selectedId, onSelect }: {
+function Cell({ rect, depth, selectedId, onSelect, nameOf }: {
   rect: TreemapRect<MapNode>;
   depth: number;
   selectedId: string | null;
   onSelect: (node: MapNode) => void;
+  nameOf: (node: MapNode) => string;
 }) {
   const { node } = rect;
+  const name = nameOf(node);
   const canNest = depth < MAX_DEPTH && rect.w >= 56 && rect.h >= 40 && node.children.some((child) => child.size > 0);
   const children = canNest
     ? layoutTreemap(node.children, rect.w - CELL_INSET * 2, rect.h - CHILD_TOP - CELL_INSET, CELL_INSET)
@@ -28,21 +31,21 @@ function Cell({ rect, depth, selectedId, onSelect }: {
     <div className="vc-map-cell" style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}>
       <button
         type="button"
-        aria-label={`${node.name}, ${human(node.size)}, ${node.path}`}
+        aria-label={`${name}, ${human(node.size)}, ${node.path}`}
         aria-pressed={selectedId === node.id}
         className="vc-map-tile vc-corner-smooth"
         data-depth={depth}
         onClick={(event) => { event.stopPropagation(); onSelect(node); }}
-        title={`${node.name} · ${human(node.size)}\n${node.path}`}
+        title={`${name} · ${human(node.size)}\n${node.path}`}
       >
         {rect.w >= 24 && rect.h >= 16 && (
-          <span className="vc-map-label text-style-micro">{node.name} · {human(node.size)}</span>
+          <span className="vc-map-label text-style-micro">{name} · {human(node.size)}</span>
         )}
       </button>
       {children.length > 0 && (
         <div className="vc-map-children">
           {children.map((child) => (
-            <Cell key={child.node.id} rect={child} depth={depth + 1} selectedId={selectedId} onSelect={onSelect} />
+            <Cell key={child.node.id} rect={child} depth={depth + 1} selectedId={selectedId} onSelect={onSelect} nameOf={nameOf} />
           ))}
         </div>
       )}
@@ -57,6 +60,13 @@ export function Treemap({ root, snapshotId, onReveal }: {
 }) {
   const { t } = useLocale();
   const [selected, setSelected] = useState<MapNode | null>(null);
+  // Aggregates ("… N smaller items") are selectable, never revealable, and
+  // their backend label is English-only, so it is localized here.
+  const nameOf = (node: MapNode) => {
+    if (!isAggregateNode(node)) return node.name;
+    const count = aggregateItemCount(node.name);
+    return count === null ? node.name : t("mapSmallerItems", { count });
+  };
   const [revealing, setRevealing] = useState(false);
   const [copying, setCopying] = useState(false);
   const [dims, setDims] = useState({ w: 0, h: 0 });
@@ -107,7 +117,7 @@ export function Treemap({ root, snapshotId, onReveal }: {
       <section className="vc-map-surface vc-corner-smooth" aria-label={t("diskMap")} onClick={() => setSelected(null)}>
         <div ref={ref} className="vc-map-canvas">
           {rects.map((rect) => (
-            <Cell key={rect.node.id} rect={rect} depth={0} selectedId={selected?.id ?? null} onSelect={setSelected} />
+            <Cell key={rect.node.id} rect={rect} depth={0} selectedId={selected?.id ?? null} onSelect={setSelected} nameOf={nameOf} />
           ))}
           {dims.w > 0 && rects.length === 0 && <p className="vc-map-empty text-style-body-small">{t("mapNoData")}</p>}
         </div>
@@ -117,7 +127,7 @@ export function Treemap({ root, snapshotId, onReveal }: {
           className="vc-map-path"
           role="region"
           aria-label={t("selectedMapItem")}
-          name={selected.name}
+          name={nameOf(selected)}
           size={human(selected.size)}
           path={selected.path}
         >

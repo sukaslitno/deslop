@@ -29,7 +29,7 @@ export function OrbitingCircles({
     >
       {label && <span className="sr-only">{label}</span>}
       <div
-        className="rounded-full bg-foreground"
+        className="rounded-full bg-[var(--vc-text-primary)]"
         style={{ width: centerSize, height: centerSize }}
       />
       {[1, -1].map((direction) => (
@@ -40,7 +40,7 @@ export function OrbitingCircles({
           transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
         >
           <div
-            className="absolute top-0 left-1/2 rounded-full bg-muted-foreground"
+            className="absolute top-0 left-1/2 rounded-full bg-[var(--vc-text-secondary)]"
             style={{
               width: orbitSize,
               height: orbitSize,

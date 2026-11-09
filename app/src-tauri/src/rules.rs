@@ -38,8 +38,9 @@ fn paths_for_macos(rule_id: &str, home: &Path) -> Vec<PathBuf> {
         "appcache" => app_cache_paths(home),
         "pkg" => existing(
             [
+                // `.npm/_npx` is deliberately absent: it holds the packages of
+                // running `npx` commands, and removing it breaks them.
                 ".npm/_cacache",
-                ".npm/_npx",
                 ".bun/install/cache",
                 ".cache/uv",
                 ".cache/pip",
@@ -178,7 +179,10 @@ pub fn app_cache_paths(home: &Path) -> Vec<PathBuf> {
         home.join("Library/Caches/company.thebrowser.Browser"),
         home.join("Library/Caches/LarkInternational"),
         home.join("Library/Caches/Codex"),
+        // Both bundle ids exist on different machines (ChatGPT desktop and
+        // the Codex desktop app).
         home.join("Library/Caches/com.openai.chat"),
+        home.join("Library/Caches/com.openai.codex"),
     ];
     append_profile_caches(
         &mut paths,
