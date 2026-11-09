@@ -193,6 +193,11 @@ const RULES: &[Rule] = &[
     Rule { id: "pkg", title: "Package caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::PackageCaches, owner: "Package tools", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos", "windows"], note: "Exact package-manager cache roots; projects are not selected.", restore: None },
     Rule { id: "xcode", title: "Xcode caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::DeveloperCaches, owner: "Xcode", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos"], note: "Derived data and simulator cache are rebuilt by Xcode.", restore: None },
     Rule { id: "hf", title: "Hugging Face cache", tier: Tier::Yellow, cleanup_category: CleanupCategoryId::ModelCaches, owner: "Hugging Face", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos"], note: "Models and datasets are never selected automatically; their exact path alone does not prove recovery is safe.", restore: Some("Re-run the model or dataset download.") },
+    Rule { id: "browsers", title: "Browser caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::ApplicationCaches, owner: "Browser", action: ActionMethod::Delete, required_probe: ProbeRequirement::OwnerAndSqlite, supported_on: &["macos"], note: "Exact browser cache leaves only. Cookies, passwords, form data, local storage, IndexedDB and sessions are never selected.", restore: Some("Reopen the browser; it recreates its caches while you browse.") },
+    Rule { id: "devcaches", title: "Developer tool caches", tier: Tier::Green, cleanup_category: CleanupCategoryId::PackageCaches, owner: "Developer tools", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos"], note: "Exact tool cache roots (TypeScript, Vite, webpack, ESLint, ruff, mypy, Yarn v1, Android build caches); projects are not selected.", restore: Some("The tool rebuilds its cache on the next run.") },
+    Rule { id: "maclogs", title: "macOS logs and thumbnails", tier: Tier::Green, cleanup_category: CleanupCategoryId::ApplicationCaches, owner: "macOS", action: ActionMethod::Delete, required_probe: ProbeRequirement::None, supported_on: &["macos"], note: "User log files, the QuickLook thumbnail cache and the Handoff pasteboard cache. DiagnosticReports is never touched.", restore: None },
+    Rule { id: "review_models", title: "Large local models (review only)", tier: Tier::Red, cleanup_category: CleanupCategoryId::ModelCaches, owner: "Local models", action: ActionMethod::Manual, required_probe: ProbeRequirement::None, supported_on: &["macos"], note: "Downloaded local models can be very large and are expensive to fetch again. Deslop shows them but never deletes them.", restore: Some("Remove models yourself with the owning app (for example `ollama rm`).") },
+    Rule { id: "review_dev", title: "Large developer data (review only)", tier: Tier::Red, cleanup_category: CleanupCategoryId::DeveloperCaches, owner: "Developer data", action: ActionMethod::Manual, required_probe: ProbeRequirement::None, supported_on: &["macos"], note: "iOS backups, Android emulators, Docker disk images and VM bundles may hold irreplaceable data. Deslop shows them but never deletes them.", restore: Some("Review and remove them yourself in Finder or the owning application.") },
     Rule { id: "project", title: "Selected project artifacts", tier: Tier::Green, cleanup_category: CleanupCategoryId::ProjectArtifacts, owner: "Project build", action: ActionMethod::Delete, required_probe: ProbeRequirement::Owner, supported_on: &["macos"], note: "Only selected project roots with confirmed build artifacts are checked; arbitrary build and dist folders are never candidates.", restore: Some("Use the project's normal build or install command to recreate artifacts.") },
 ];
 
@@ -849,10 +854,37 @@ fn candidate_owner(rule: Rule, path: &Path, home: &Path) -> String {
         "appcache" if lower("slack") => "Slack".into(),
         "appcache" if lower("figma") => "Figma".into(),
         "appcache" if exact("Arc") || lower("thebrowser") => "Arc".into(),
-        "appcache" if exact("Claude") => "Claude".into(),
+        "appcache" if exact("Claude") || lower("claudefordesktop") => "Claude".into(),
         "appcache" if lower("codex") => "Codex".into(),
         "appcache" if exact("ChatGPT") || exact("com.openai.chat") => "ChatGPT".into(),
         "appcache" if has_part(&parts, |part: &str| part.starts_with("Lark")) => "Lark".into(),
+        "appcache" if lower("discord") => "Discord".into(),
+        "appcache" if lower("zoom") => "Zoom".into(),
+        "appcache" if lower("telegram") => "Telegram".into(),
+        "appcache" if lower("notion") => "Notion".into(),
+        "appcache" if lower("obsidian") => "Obsidian".into(),
+        "appcache" if exact("Steam") => "Steam".into(),
+        "appcache" if exact("com.microsoft.teams2") => "Microsoft Teams".into(),
+        "appcache" if exact("Adobe") => "Adobe".into(),
+        "appcache" if lower("dropbox") => "Dropbox".into(),
+        "appcache" if exact("com.google.GoogleDrive") => "Google Drive".into(),
+        "appcache" if exact("com.microsoft.OneDrive") => "OneDrive".into(),
+        "browsers" if exact("Chrome") => "Google Chrome".into(),
+        "browsers" if exact("BraveSoftware") => "Brave Browser".into(),
+        "browsers" if exact("Microsoft Edge") => "Microsoft Edge".into(),
+        "browsers" if exact("Chromium") => "Chromium".into(),
+        "browsers" if exact("Vivaldi") => "Vivaldi".into(),
+        "browsers" if exact("Firefox") => "Firefox".into(),
+        "browsers" if exact("com.apple.Safari") => "Safari".into(),
+        "devcaches" if exact("Yarn") => "Yarn".into(),
+        "devcaches" if exact(".cargo") => "Cargo".into(),
+        "devcaches" if exact(".gradle") => "Gradle".into(),
+        "devcaches" if has_part(&parts, |part: &str| part.starts_with("AndroidStudio")) => {
+            "Android Studio".into()
+        }
+        "devcaches" if exact(".android") => "Android SDK".into(),
+        "devcaches" if exact("ruff") || exact("mypy") => "Python tooling".into(),
+        "devcaches" => "Node tooling".into(),
         "editors" if exact("Cursor") => "Cursor".into(),
         "editors" if exact("Code - Insiders") => "Code - Insiders".into(),
         "editors" => "Code".into(),
@@ -878,8 +910,67 @@ fn is_jetbrains_cache(path: &Path) -> bool {
     path.ends_with("Library/Caches/JetBrains")
 }
 
+/// Per-path overrides for entries that regenerate only at a download or
+/// rebuild cost: (reason, restore). They are YELLOW and need confirmation.
+fn costly_regeneration(rule: Rule, path: &Path) -> Option<(&'static str, &'static str)> {
+    let name = path.file_name().and_then(|name| name.to_str())?;
+    let under = |suffix: &str| path.parent().is_some_and(|parent| parent.ends_with(suffix));
+    match rule.id {
+        "xcode" if path.ends_with("Library/Developer/Xcode/DerivedData") => Some((
+            "Xcode derived data; the next build of each project starts from scratch",
+            "Xcode rebuilds derived data on next build",
+        )),
+        "xcode" if name.ends_with("DeviceSupport") && under("Library/Developer/Xcode") => Some((
+            "debug symbols for old iOS versions; Xcode re-downloads on next device connect",
+            "Reconnect the device; Xcode downloads the symbols again.",
+        )),
+        "browsers"
+            if name == "OptGuideOnDeviceModel" || name == "optimization_guide_model_store" =>
+        {
+            Some((
+                "browser on-device AI models; they are downloaded again when needed",
+                "The browser downloads the models again on demand.",
+            ))
+        }
+        "browsers" if path.ends_with("Library/Caches/com.apple.Safari") => Some((
+            "Safari cache; needs Full Disk Access for Deslop and Safari must be closed",
+            "Safari rebuilds its cache while you browse.",
+        )),
+        "appcache"
+            if (name == "Media Cache Files" || name == "Media Cache") && under("Adobe/Common") =>
+        {
+            Some((
+                "Adobe media cache; previews and conformed audio must be rendered again",
+                "Adobe apps rebuild the media cache on next open; large projects take time.",
+            ))
+        }
+        "appcache"
+            if matches!(
+                name,
+                "com.getdropbox.dropbox" | "com.google.GoogleDrive" | "com.microsoft.OneDrive"
+            ) && under("Library/Caches") =>
+        {
+            Some((
+                "sync client cache; the client may re-index files on next launch",
+                "Open the sync client; it rebuilds its cache.",
+            ))
+        }
+        "devcaches" if path.ends_with(".cargo/registry/cache") => Some((
+            "downloaded crate archives; Cargo fetches them again on the next build",
+            "Run cargo build; crates are downloaded again.",
+        )),
+        "devcaches" if path.ends_with(".gradle/caches/build-cache-1") => Some((
+            "Gradle build cache; tasks run again without cache hits",
+            "Run your Gradle build; it repopulates the cache.",
+        )),
+        _ => None,
+    }
+}
+
 fn candidate_tier(rule: Rule, path: &Path) -> Tier {
-    if rule.id == "appcache" && is_service_worker_cache(path) {
+    if costly_regeneration(rule, path).is_some() {
+        Tier::Yellow
+    } else if rule.id == "appcache" && is_service_worker_cache(path) {
         // Exact location is not a recovery contract for offline application
         // data. It is visible only after explicit review and never selected
         // automatically.
@@ -894,7 +985,9 @@ fn candidate_tier(rule: Rule, path: &Path) -> Tier {
 }
 
 fn candidate_reason(rule: Rule, path: &Path) -> String {
-    if rule.id == "appcache" && is_service_worker_cache(path) {
+    if let Some((reason, _)) = costly_regeneration(rule, path) {
+        reason.into()
+    } else if rule.id == "appcache" && is_service_worker_cache(path) {
         "Service Worker CacheStorage needs explicit review; Deslop never selects it automatically."
             .into()
     } else if rule.id == "pkg" && is_playwright_browsers(path) {
@@ -907,7 +1000,9 @@ fn candidate_reason(rule: Rule, path: &Path) -> String {
 }
 
 fn candidate_restore(rule: Rule, path: &Path) -> Option<String> {
-    if rule.id == "pkg" && is_playwright_browsers(path) {
+    if let Some((_, restore)) = costly_regeneration(rule, path) {
+        Some(restore.into())
+    } else if rule.id == "pkg" && is_playwright_browsers(path) {
         Some("npx playwright install".into())
     } else if rule.id == "pkg" && is_jetbrains_cache(path) {
         Some("Reopen the JetBrains IDE; it rebuilds its indexes.".into())
@@ -1819,6 +1914,60 @@ fn process_names_for_owner(owner: &str) -> Vec<&'static str> {
             "XCBBuildService",
             "swift-frontend",
         ],
+        "Discord" => vec![
+            "Discord",
+            "Discord Helper",
+            "Discord Helper (Renderer)",
+            "Discord Helper (GPU)",
+        ],
+        "Zoom" => vec!["zoom.us"],
+        "Telegram" => vec!["Telegram"],
+        "Notion" => vec!["Notion", "Notion Helper", "Notion Helper (Renderer)"],
+        "Obsidian" => vec!["Obsidian", "Obsidian Helper", "Obsidian Helper (Renderer)"],
+        "Steam" => vec!["steam_osx", "Steam Helper"],
+        "Microsoft Teams" => vec!["MSTeams", "Microsoft Teams"],
+        "Adobe" => vec![
+            "Adobe Premiere Pro",
+            "Adobe After Effects",
+            "Adobe Media Encoder",
+            "Adobe Photoshop 2025",
+            "Adobe Photoshop 2026",
+        ],
+        "Dropbox" => vec!["Dropbox"],
+        "Google Drive" => vec!["Google Drive"],
+        "OneDrive" => vec!["OneDrive"],
+        "Google Chrome" => vec![
+            "Google Chrome",
+            "Google Chrome Helper",
+            "Google Chrome Helper (Renderer)",
+            "Google Chrome Helper (GPU)",
+        ],
+        "Brave Browser" => vec![
+            "Brave Browser",
+            "Brave Browser Helper",
+            "Brave Browser Helper (Renderer)",
+            "Brave Browser Helper (GPU)",
+        ],
+        "Microsoft Edge" => vec![
+            "Microsoft Edge",
+            "Microsoft Edge Helper",
+            "Microsoft Edge Helper (Renderer)",
+            "Microsoft Edge Helper (GPU)",
+        ],
+        "Chromium" => vec!["Chromium", "Chromium Helper"],
+        "Vivaldi" => vec!["Vivaldi", "Vivaldi Helper"],
+        "Firefox" => vec!["firefox"],
+        "Safari" => vec!["Safari"],
+        "Node tooling" => vec![
+            "tsc", "tsserver", "vite", "webpack", "eslint", "eslint_d", "prettier", "turbo",
+            "parcel", "node-gyp",
+        ],
+        "Python tooling" => vec!["ruff", "mypy", "dmypy"],
+        "Yarn" => vec!["yarn"],
+        "Cargo" => vec!["cargo", "rustc"],
+        "Gradle" => vec!["gradle"],
+        "Android SDK" => vec!["adb", "emulator", "studio"],
+        "Android Studio" => vec!["studio"],
         "pnpm" => vec!["pnpm"],
         "npm" => vec!["npm"],
         "Bun" => vec!["bun"],
@@ -2030,6 +2179,14 @@ fn singleton_lock_dirs(owner: &str, candidate: &Path, home: &Path) -> Vec<PathBu
         "Codex" => vec![support.join("Codex")],
         "ChatGPT" => vec![support.join("ChatGPT"), support.join("com.openai.chat")],
         "Lark" => vec![support.join("LarkInternational"), support.join("Lark")],
+        "Discord" => vec![support.join("discord")],
+        "Notion" => vec![support.join("Notion")],
+        "Obsidian" => vec![support.join("obsidian")],
+        "Google Chrome" => vec![support.join("Google/Chrome")],
+        "Brave Browser" => vec![support.join("BraveSoftware/Brave-Browser")],
+        "Microsoft Edge" => vec![support.join("Microsoft Edge")],
+        "Chromium" => vec![support.join("Chromium")],
+        "Vivaldi" => vec![support.join("Vivaldi")],
         _ => Vec::new(),
     };
     if owner == "Figma" {
@@ -2608,8 +2765,11 @@ fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<(), Stri
             .map_err(|error| format!("cannot sync local storage transaction: {error}"))?;
         fs::rename(&temporary, path)
             .map_err(|error| format!("cannot replace local storage atomically: {error}"))?;
-        // Best effort directory sync makes the completed rename durable on
-        // filesystems that support it; a failure here is still reported.
+        // Directory sync makes the completed rename durable on filesystems
+        // that support it; a failure here is still reported. Windows cannot
+        // open a directory handle this way (ERROR_ACCESS_DENIED), and NTFS
+        // journals the rename itself, so the step is Unix-only.
+        #[cfg(not(windows))]
         fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| format!("cannot sync local storage directory: {error}"))?;
@@ -6351,5 +6511,488 @@ mod tests {
             ),
             "Code"
         );
+    }
+
+    #[cfg(not(windows))]
+    fn make_dirs(home: &Path, relatives: &[&str]) {
+        for relative in relatives {
+            fs::create_dir_all(home.join(relative)).unwrap();
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn browser_rule_selects_cache_leaves_and_never_profile_data() {
+        let home = fixture();
+        let chrome = "Library/Application Support/Google/Chrome";
+        make_dirs(
+            &home,
+            &[
+                "Library/Caches/Google/Chrome",
+                "Library/Application Support/Google/Chrome/Default/Code Cache",
+                "Library/Application Support/Google/Chrome/Default/GPUCache",
+                "Library/Application Support/Google/Chrome/Default/Cookies",
+                "Library/Application Support/Google/Chrome/Default/Local Storage",
+                "Library/Application Support/Google/Chrome/Default/IndexedDB",
+                "Library/Application Support/Google/Chrome/Default/Sessions",
+                "Library/Application Support/Google/Chrome/Default/Service Worker/ScriptCache",
+                "Library/Application Support/Google/Chrome/ShaderCache",
+                "Library/Application Support/Google/Chrome/Crashpad/completed",
+                "Library/Application Support/Google/Chrome/Crashpad/pending",
+                "Library/Application Support/Google/Chrome/OptGuideOnDeviceModel",
+                "Library/Application Support/Firefox/Profiles/abc.default/cache2",
+                "Library/Application Support/Firefox/Profiles/abc.default/storage",
+                "Library/Caches/com.apple.Safari",
+                "Library/Application Support/BraveSoftware/Brave-Browser/Default/GPUCache",
+            ],
+        );
+        fs::write(home.join(chrome).join("Default/Login Data"), b"x").unwrap();
+        fs::write(home.join(chrome).join("Default/Web Data"), b"x").unwrap();
+        fs::write(home.join(chrome).join("Local State"), b"x").unwrap();
+        fs::write(
+            home.join("Library/Application Support/Firefox/Profiles/abc.default/cookies.sqlite"),
+            b"x",
+        )
+        .unwrap();
+        let paths = rules::paths_for("browsers", &home);
+        for leaf in [
+            "Library/Caches/Google/Chrome",
+            "Library/Application Support/Google/Chrome/Default/Code Cache",
+            "Library/Application Support/Google/Chrome/Default/GPUCache",
+            "Library/Application Support/Google/Chrome/ShaderCache",
+            "Library/Application Support/Google/Chrome/Crashpad/completed",
+            "Library/Application Support/Google/Chrome/OptGuideOnDeviceModel",
+            "Library/Application Support/Firefox/Profiles/abc.default/cache2",
+            "Library/Caches/com.apple.Safari",
+            "Library/Application Support/BraveSoftware/Brave-Browser/Default/GPUCache",
+        ] {
+            assert!(paths.contains(&home.join(leaf)), "missing {leaf}");
+        }
+        for protected in [
+            "Default/Cookies",
+            "Default/Login Data",
+            "Default/Web Data",
+            "Default/Local Storage",
+            "Default/IndexedDB",
+            "Default/Sessions",
+            "Default/Service Worker/ScriptCache",
+            "Crashpad/pending",
+            "Crashpad",
+            "Local State",
+        ] {
+            assert!(
+                !paths.contains(&home.join(chrome).join(protected)),
+                "protected {protected} selected"
+            );
+        }
+        assert!(!paths.contains(&home.join(chrome)));
+        assert!(!paths.contains(
+            &home.join("Library/Application Support/Firefox/Profiles/abc.default/cookies.sqlite")
+        ));
+        assert!(!paths.contains(
+            &home.join("Library/Application Support/Firefox/Profiles/abc.default/storage")
+        ));
+        let rule = rule_for_id("browsers").unwrap();
+        assert_eq!(rule.required_probe, ProbeRequirement::OwnerAndSqlite);
+        let owner = |relative: &str| candidate_owner(rule, &home.join(relative), &home);
+        assert_eq!(owner("Library/Caches/Google/Chrome"), "Google Chrome");
+        assert_eq!(
+            owner("Library/Application Support/BraveSoftware/Brave-Browser/Default/GPUCache"),
+            "Brave Browser"
+        );
+        assert_eq!(owner("Library/Caches/com.apple.Safari"), "Safari");
+        assert_eq!(
+            owner("Library/Application Support/Firefox/Profiles/abc.default/cache2"),
+            "Firefox"
+        );
+        let tier = |relative: &str| candidate_tier(rule, &home.join(relative));
+        assert_eq!(tier("Library/Caches/Google/Chrome"), Tier::Green);
+        assert_eq!(
+            tier("Library/Application Support/Google/Chrome/OptGuideOnDeviceModel"),
+            Tier::Yellow
+        );
+        assert_eq!(tier("Library/Caches/com.apple.Safari"), Tier::Yellow);
+        assert!(
+            candidate_reason(rule, &home.join("Library/Caches/com.apple.Safari"))
+                .contains("Full Disk Access")
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn xcode_device_support_and_derived_data_need_confirmation_but_simulator_devices_stay_out() {
+        let home = fixture();
+        make_dirs(
+            &home,
+            &[
+                "Library/Developer/Xcode/DerivedData",
+                "Library/Developer/Xcode/iOS DeviceSupport",
+                "Library/Developer/Xcode/watchOS DeviceSupport",
+                "Library/Developer/Xcode/tvOS DeviceSupport",
+                "Library/Developer/Xcode/Archives",
+                "Library/Developer/CoreSimulator/Caches",
+                "Library/Developer/CoreSimulator/Devices",
+                "Library/Caches/com.apple.dt.Xcode",
+            ],
+        );
+        let paths = rules::paths_for("xcode", &home);
+        assert_eq!(paths.len(), 5);
+        for excluded in [
+            "Library/Developer/Xcode/Archives",
+            "Library/Developer/CoreSimulator/Devices",
+            "Library/Caches/com.apple.dt.Xcode",
+        ] {
+            assert!(!paths.contains(&home.join(excluded)));
+        }
+        let rule = rule_for_id("xcode").unwrap();
+        let tier = |relative: &str| candidate_tier(rule, &home.join(relative));
+        assert_eq!(tier("Library/Developer/Xcode/DerivedData"), Tier::Yellow);
+        assert_eq!(
+            tier("Library/Developer/Xcode/iOS DeviceSupport"),
+            Tier::Yellow
+        );
+        assert_eq!(tier("Library/Developer/CoreSimulator/Caches"), Tier::Green);
+        assert_eq!(
+            candidate_restore(rule, &home.join("Library/Developer/Xcode/DerivedData")).as_deref(),
+            Some("Xcode rebuilds derived data on next build")
+        );
+        assert!(candidate_reason(
+            rule,
+            &home.join("Library/Developer/Xcode/watchOS DeviceSupport")
+        )
+        .contains("re-downloads on next device connect"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn dev_cache_rule_selects_exact_tool_caches_and_skips_yarn_berry_and_project_files() {
+        let home = fixture();
+        make_dirs(
+            &home,
+            &[
+                ".cache/typescript",
+                ".cache/ruff",
+                ".cache/mypy",
+                ".cache/other-tool",
+                ".turbo/cache",
+                ".turbo/config",
+                "Library/Caches/Yarn",
+                ".yarn/berry",
+                ".cargo/registry/cache",
+                ".cargo/registry/src",
+                ".cargo/bin",
+                ".gradle/caches/build-cache-1",
+                ".gradle/caches/modules-2",
+                ".android/build-cache",
+                ".android/avd",
+                "Library/Caches/Google/AndroidStudio2024.1",
+                "Library/Caches/Google/Chrome",
+            ],
+        );
+        fs::write(home.join(".cache/package.json"), b"{}").unwrap();
+        let paths = rules::paths_for("devcaches", &home);
+        for leaf in [
+            ".cache/typescript",
+            ".cache/ruff",
+            ".turbo/cache",
+            "Library/Caches/Yarn",
+            ".cargo/registry/cache",
+            ".gradle/caches/build-cache-1",
+            ".android/build-cache",
+            "Library/Caches/Google/AndroidStudio2024.1",
+        ] {
+            assert!(paths.contains(&home.join(leaf)), "missing {leaf}");
+        }
+        for excluded in [
+            ".cache/other-tool",
+            ".turbo/config",
+            ".yarn/berry",
+            ".cargo/registry/src",
+            ".cargo/bin",
+            ".gradle/caches/modules-2",
+            ".android/avd",
+            "Library/Caches/Google/Chrome",
+        ] {
+            assert!(!paths.contains(&home.join(excluded)), "{excluded}");
+        }
+        let rule = rule_for_id("devcaches").unwrap();
+        let owner = |relative: &str| candidate_owner(rule, &home.join(relative), &home);
+        assert_eq!(owner(".cache/typescript"), "Node tooling");
+        assert_eq!(owner(".cache/mypy"), "Python tooling");
+        assert_eq!(owner("Library/Caches/Yarn"), "Yarn");
+        assert_eq!(owner(".cargo/registry/cache"), "Cargo");
+        assert_eq!(owner(".gradle/caches/build-cache-1"), "Gradle");
+        assert_eq!(owner(".android/build-cache"), "Android SDK");
+        assert_eq!(
+            owner("Library/Caches/Google/AndroidStudio2024.1"),
+            "Android Studio"
+        );
+        let tier = |relative: &str| candidate_tier(rule, &home.join(relative));
+        assert_eq!(tier(".cache/vite"), Tier::Green);
+        assert_eq!(tier(".cargo/registry/cache"), Tier::Yellow);
+        assert_eq!(tier(".gradle/caches/build-cache-1"), Tier::Yellow);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn app_rule_extension_covers_exact_app_caches_and_skips_user_data() {
+        let home = fixture();
+        make_dirs(
+            &home,
+            &[
+                "Library/Caches/com.anthropic.claudefordesktop",
+                "Library/Logs/Claude",
+                "Library/Application Support/Codex/Crashpad/pending",
+                "Library/Application Support/Codex/sessions",
+                "Library/Application Support/discord/Cache",
+                "Library/Application Support/discord/Local Storage",
+                "Library/Application Support/Steam/steamapps/shadercache",
+                "Library/Application Support/Steam/steamapps/common",
+                "Library/Application Support/Steam/userdata",
+                "Library/Application Support/Adobe/Common/Media Cache Files",
+                "Library/Application Support/Adobe/Common/Presets",
+                "Library/Caches/com.getdropbox.dropbox",
+                "Library/Caches/com.spotify.client",
+                "Library/Caches/us.zoom.xos",
+                "Library/Caches/notion.id",
+                ".claude/projects",
+                ".codex/sessions",
+            ],
+        );
+        fs::write(
+            home.join("Library/Application Support/discord/Cookies"),
+            b"x",
+        )
+        .unwrap();
+        let paths = rules::app_cache_paths(&home);
+        for leaf in [
+            "Library/Caches/com.anthropic.claudefordesktop",
+            "Library/Logs/Claude",
+            "Library/Application Support/Codex/Crashpad/pending",
+            "Library/Application Support/discord/Cache",
+            "Library/Application Support/Steam/steamapps/shadercache",
+            "Library/Application Support/Adobe/Common/Media Cache Files",
+            "Library/Caches/com.getdropbox.dropbox",
+            "Library/Caches/us.zoom.xos",
+            "Library/Caches/notion.id",
+        ] {
+            assert!(paths.contains(&home.join(leaf)), "missing {leaf}");
+        }
+        for excluded in [
+            "Library/Application Support/Codex/sessions",
+            "Library/Application Support/discord/Local Storage",
+            "Library/Application Support/discord/Cookies",
+            "Library/Application Support/Steam/steamapps/common",
+            "Library/Application Support/Steam/userdata",
+            "Library/Application Support/Adobe/Common/Presets",
+            "Library/Caches/com.spotify.client",
+            ".claude/projects",
+            ".codex/sessions",
+        ] {
+            assert!(!paths.contains(&home.join(excluded)), "{excluded}");
+        }
+        let rule = rule_for_id("appcache").unwrap();
+        let owner = |relative: &str| candidate_owner(rule, &home.join(relative), &home);
+        assert_eq!(
+            owner("Library/Caches/com.anthropic.claudefordesktop"),
+            "Claude"
+        );
+        assert_eq!(owner("Library/Logs/Claude"), "Claude");
+        assert_eq!(
+            owner("Library/Application Support/Codex/Crashpad/pending"),
+            "Codex"
+        );
+        assert_eq!(
+            owner("Library/Application Support/discord/Cache"),
+            "Discord"
+        );
+        assert_eq!(
+            owner("Library/Application Support/Steam/steamapps/shadercache"),
+            "Steam"
+        );
+        assert_eq!(owner("Library/Caches/us.zoom.xos"), "Zoom");
+        assert_eq!(owner("Library/Caches/notion.id"), "Notion");
+        assert_eq!(
+            owner("Library/Application Support/Adobe/Common/Media Cache Files"),
+            "Adobe"
+        );
+        assert_eq!(owner("Library/Caches/com.getdropbox.dropbox"), "Dropbox");
+        let tier = |relative: &str| candidate_tier(rule, &home.join(relative));
+        assert_eq!(tier("Library/Caches/us.zoom.xos"), Tier::Green);
+        assert_eq!(
+            tier("Library/Application Support/Adobe/Common/Media Cache Files"),
+            Tier::Yellow
+        );
+        assert_eq!(tier("Library/Caches/com.getdropbox.dropbox"), Tier::Yellow);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn mac_logs_rule_lists_log_children_but_never_diagnostic_reports() {
+        let home = fixture();
+        make_dirs(
+            &home,
+            &[
+                "Library/Logs/Homebrew",
+                "Library/Logs/DiagnosticReports",
+                "Library/Logs/Claude",
+                "Library/Caches/com.apple.QuickLook.thumbnailcache",
+                "Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard",
+                "Library/Group Containers/group.com.apple.coreservices.useractivityd/other",
+            ],
+        );
+        fs::write(home.join("Library/Logs/DiagnosticReports/crash.ips"), b"x").unwrap();
+        fs::write(home.join("Library/Logs/app.log"), b"x").unwrap();
+        let paths = rules::paths_for("maclogs", &home);
+        assert!(paths.contains(&home.join("Library/Logs/Homebrew")));
+        assert!(paths.contains(&home.join("Library/Logs/app.log")));
+        assert!(paths.contains(&home.join("Library/Caches/com.apple.QuickLook.thumbnailcache")));
+        assert!(paths.contains(&home.join(
+            "Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard"
+        )));
+        assert!(!paths.contains(&home.join("Library/Logs")));
+        assert!(!paths.contains(&home.join("Library/Logs/DiagnosticReports")));
+        assert!(!paths.contains(&home.join("Library/Logs/DiagnosticReports/crash.ips")));
+        assert!(!paths.contains(&home.join("Library/Logs/Claude")));
+        assert!(!paths.contains(
+            &home.join("Library/Group Containers/group.com.apple.coreservices.useractivityd/other")
+        ));
+        assert!(rules::paths_for("appcache", &home).contains(&home.join("Library/Logs/Claude")));
+        let rule = rule_for_id("maclogs").unwrap();
+        assert_eq!(rule.required_probe, ProbeRequirement::None);
+        assert_eq!(rule.tier, Tier::Green);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn review_rules_are_red_manual_and_scanned_as_manual_candidates() {
+        let home = fixture();
+        make_dirs(
+            &home,
+            &[
+                ".ollama/models",
+                ".lmstudio/models",
+                "Library/Application Support/MobileSync/Backup",
+                ".android/avd",
+                "Library/Application Support/Claude/vm_bundles",
+                "Library/Application Support/Claude/Cache",
+                ".ollama/history",
+            ],
+        );
+        fs::create_dir_all(home.join("Library/Containers/com.docker.docker/Data/vms/0/data"))
+            .unwrap();
+        fs::write(
+            home.join("Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"),
+            b"x",
+        )
+        .unwrap();
+        let models = rules::paths_for("review_models", &home);
+        assert!(models.contains(&home.join(".ollama/models")));
+        assert!(models.contains(&home.join(".lmstudio/models")));
+        assert!(!models.contains(&home.join(".ollama/history")));
+        let dev = rules::paths_for("review_dev", &home);
+        assert_eq!(dev.len(), 4);
+        assert!(dev.contains(&home.join("Library/Application Support/Claude/vm_bundles")));
+        assert!(!dev.contains(&home.join("Library/Application Support/Claude/Cache")));
+        let models_rule = rule_for_id("review_models").unwrap();
+        let dev_rule = rule_for_id("review_dev").unwrap();
+        assert_eq!(models_rule.cleanup_category, CleanupCategoryId::ModelCaches);
+        assert_eq!(
+            dev_rule.cleanup_category,
+            CleanupCategoryId::DeveloperCaches
+        );
+        for rule in [models_rule, dev_rule] {
+            assert_eq!(rule.tier, Tier::Red);
+            assert_eq!(rule.action, ActionMethod::Manual);
+            assert_eq!(rule.supported_on, &["macos"]);
+        }
+        let state = engine(&home);
+        let mut candidates = BTreeMap::new();
+        for path in models.into_iter().chain(dev) {
+            let rule = if path.ends_with(".ollama/models") || path.ends_with(".lmstudio/models") {
+                models_rule
+            } else {
+                dev_rule
+            };
+            add_candidate(&state, "snapshot", rule, path, &mut candidates);
+        }
+        assert_eq!(candidates.len(), 6);
+        assert!(candidates
+            .values()
+            .all(|c| c.tier == Tier::Red && c.action == ActionMethod::Manual));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn new_rules_are_recognised_by_exact_rule_lookup_and_have_owner_mappings() {
+        let home = fixture();
+        make_dirs(
+            &home,
+            &[
+                "Library/Caches/Google/Chrome",
+                ".cache/vite",
+                "Library/Caches/com.apple.QuickLook.thumbnailcache",
+                ".ollama/models",
+                "Library/Application Support/MobileSync/Backup",
+            ],
+        );
+        let lookup = |relative: &str| rules::exact_rule_for_path(&home.join(relative), &home);
+        assert_eq!(lookup("Library/Caches/Google/Chrome"), Some("browsers"));
+        assert_eq!(lookup(".cache/vite"), Some("devcaches"));
+        assert_eq!(
+            lookup("Library/Caches/com.apple.QuickLook.thumbnailcache"),
+            Some("maclogs")
+        );
+        assert_eq!(lookup(".ollama/models"), Some("review_models"));
+        assert_eq!(
+            lookup("Library/Application Support/MobileSync/Backup"),
+            Some("review_dev")
+        );
+        for owner in [
+            "Google Chrome",
+            "Brave Browser",
+            "Microsoft Edge",
+            "Chromium",
+            "Vivaldi",
+            "Firefox",
+            "Safari",
+            "Discord",
+            "Zoom",
+            "Telegram",
+            "Notion",
+            "Obsidian",
+            "Steam",
+            "Microsoft Teams",
+            "Adobe",
+            "Dropbox",
+            "Google Drive",
+            "OneDrive",
+            "Node tooling",
+            "Python tooling",
+            "Yarn",
+            "Cargo",
+            "Gradle",
+            "Android SDK",
+            "Android Studio",
+        ] {
+            assert!(
+                !process_names_for_owner(owner).is_empty(),
+                "no process names for {owner}"
+            );
+        }
+        assert!(process_names_for_owner("Google Chrome").contains(&"Google Chrome Helper"));
+        assert!(process_names_for_owner("Firefox").contains(&"firefox"));
+        let chrome_cache = home.join("Library/Caches/Google/Chrome");
+        assert!(singleton_lock_dirs("Google Chrome", &chrome_cache, &home)
+            .contains(&home.join("Library/Application Support/Google/Chrome")));
+        assert!(singleton_lock_dirs("Discord", &chrome_cache, &home)
+            .contains(&home.join("Library/Application Support/discord")));
+        fs::remove_dir_all(home).unwrap();
     }
 }
